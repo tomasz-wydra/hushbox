@@ -2,7 +2,6 @@ pynacl
 customtkinter
 segno
 Pillow
-python-telegram-bot==22.*
 pytest
 pytest-mock
 httpx

@@ -8,5 +8,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
-      - run: pytest tests/ -v
+
+      - name: Install client dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install relay server dependencies
+        run: pip install -r relay_server/requirements.txt mongomock
+
+      - name: Run client tests
+        run: pytest tests/ -v
+
+      - name: Run relay server tests
+        run: pytest relay_server/tests/ -v
