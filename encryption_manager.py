@@ -1,22 +1,21 @@
 """
-EncryptionManager - obsługuje klucze NaCl i szyfrowanie/deszyfrowanie wiadomości.
+EncryptionManager — obsługuje klucze NaCl i szyfrowanie/deszyfrowanie wiadomości.
 
 contact_keys.json przechowuje pełne dane kontaktu:
 {
   "Jan Kowalski": {
     "public_key": "base64...",
-    "telegram_bot_token": "token bota Jana (Jan Ci go podaje)",
-    "telegram_chat_id": "Chat ID Jana (Jan sprawdza przez @userinfobot)"
+    "relay_url":  "https://relay.twoja-domena.pl"   // opcjonalny override per kontakt
   }
 }
 
-Model Telegram: każdy użytkownik tworzy własnego bota i udostępnia
-swojemu kontaktowi: token bota + swoje Chat ID.
-Nadawca wysyła zaszyfrowany tekst przez bota ODBIORCY do Chat ID odbiorcy.
-Odbiorca polluje swojego własnego bota i automatycznie odbiera wiadomości.
+Model relay: każdy użytkownik posiada własny klucz publiczny NaCl.
+Nadawca szyfruje wiadomość kluczem odbiorcy i wysyła przez relay serwer.
+Odbiorca pobiera wiadomości z relay używając hash swojego klucza publicznego.
 """
 from nacl.public import PrivateKey, PublicKey, Box
 from nacl.encoding import Base64Encoder
+import hashlib
 import json
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
@@ -25,11 +24,28 @@ from dataclasses import dataclass, field, asdict
 @dataclass
 class ContactInfo:
     public_key: str
-    telegram_bot_token: str = ""      # token bota kontaktu (kontakt Ci podaje)
-    telegram_chat_id: str = ""        # Chat ID kontaktu (kontakt sprawdza przez @userinfobot)
+    relay_url:  str = ""   # opcjonalny override URL relay per kontakt
+
+    # Pola legacy Telegram — zachowane dla migracji ze starszych wersji
+    telegram_bot_token: str = ""
+    telegram_chat_id:   str = ""
+
+    @property
+    def pubkey_hash(self) -> str:
+        """SHA-256 klucza publicznego — identyfikator w relay."""
+        return hashlib.sha256(self.public_key.encode()).hexdigest()
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = {
+            "public_key": self.public_key,
+            "relay_url":  self.relay_url,
+        }
+        # zachowaj pola Telegram jeśli niepuste (kompatybilność wsteczna)
+        if self.telegram_bot_token:
+            d["telegram_bot_token"] = self.telegram_bot_token
+        if self.telegram_chat_id:
+            d["telegram_chat_id"] = self.telegram_chat_id
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "ContactInfo":
@@ -37,9 +53,10 @@ class ContactInfo:
         if isinstance(d, str):
             return cls(public_key=d)
         return cls(
-            public_key=d.get("public_key", ""),
-            telegram_chat_id=d.get("telegram_chat_id", ""),
-            telegram_bot_token=d.get("telegram_bot_token", ""),
+            public_key=         d.get("public_key", ""),
+            relay_url=          d.get("relay_url",  ""),
+            telegram_bot_token= d.get("telegram_bot_token", ""),
+            telegram_chat_id=   d.get("telegram_chat_id",  ""),
         )
 
 
@@ -48,11 +65,11 @@ class EncryptionManager:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        self.private_key_path = self.data_dir / "my_private_key.bin"
+        self.private_key_path  = self.data_dir / "my_private_key.bin"
         self.contact_keys_path = self.data_dir / "contact_keys.json"
 
         self.private_key = self._load_or_generate_private_key()
-        self.public_key = self.private_key.public_key
+        self.public_key  = self.private_key.public_key
         self.contacts: dict[str, ContactInfo] = self._load_contacts()
 
         # zachowana kompatybilność wsteczna — słownik name→public_key_b64
@@ -76,6 +93,10 @@ class EncryptionManager:
     def export_public_key(self) -> str:
         return self.public_key.encode(encoder=Base64Encoder).decode()
 
+    def my_pubkey_hash(self) -> str:
+        """SHA-256 własnego klucza publicznego."""
+        return hashlib.sha256(self.export_public_key().encode()).hexdigest()
+
     # ------------------------------------------------------------------
     # Kontakty
     # ------------------------------------------------------------------
@@ -95,28 +116,29 @@ class EncryptionManager:
         self.contact_keys = {n: c.public_key for n, c in self.contacts.items()}
 
     def add_contact(self, name: str, public_key_b64: str,
+                    relay_url: str = "",
+                    # legacy Telegram params — ignorowane jeśli relay_url ustawiony
                     telegram_bot_token: str = "",
-                    telegram_chat_id: str = "") -> None:
+                    telegram_chat_id:   str = "") -> None:
         """Dodaj lub zaktualizuj kontakt."""
         name = name.strip()
         if not name:
             raise ValueError("Nazwa kontaktu nie może być pusta.")
         PublicKey(public_key_b64.encode(), encoder=Base64Encoder)  # walidacja
-        # zachowaj istniejące dane Telegram jeśli nie podano nowych
         existing = self.contacts.get(name)
         self.contacts[name] = ContactInfo(
-            public_key=public_key_b64,
-            telegram_chat_id=telegram_chat_id or (existing.telegram_chat_id if existing else ""),
-            telegram_bot_token=telegram_bot_token or (existing.telegram_bot_token if existing else ""),
+            public_key=         public_key_b64,
+            relay_url=          relay_url or (existing.relay_url if existing else ""),
+            telegram_bot_token= telegram_bot_token or (existing.telegram_bot_token if existing else ""),
+            telegram_chat_id=   telegram_chat_id   or (existing.telegram_chat_id   if existing else ""),
         )
         self._save_contacts()
 
-    def update_telegram(self, name: str, chat_id: str, bot_token: str) -> None:
-        """Zaktualizuj dane Telegram dla istniejącego kontaktu."""
+    def update_relay(self, name: str, relay_url: str) -> None:
+        """Zaktualizuj relay URL dla kontaktu."""
         if name not in self.contacts:
             raise KeyError(f"Kontakt '{name}' nie istnieje.")
-        self.contacts[name].telegram_chat_id = chat_id.strip()
-        self.contacts[name].telegram_bot_token = bot_token.strip()
+        self.contacts[name].relay_url = relay_url.strip()
         self._save_contacts()
 
     def get_contact(self, name: str) -> ContactInfo:
@@ -144,6 +166,13 @@ class EncryptionManager:
 
     def has_contact(self, name: str) -> bool:
         return name in self.contacts
+
+    def find_contact_by_pubkey_hash(self, pubkey_hash: str) -> str | None:
+        """Znajdź nazwę kontaktu po SHA-256 jego klucza publicznego."""
+        for name, info in self.contacts.items():
+            if info.pubkey_hash == pubkey_hash:
+                return name
+        return None
 
     # ------------------------------------------------------------------
     # Szyfrowanie / Deszyfrowanie
