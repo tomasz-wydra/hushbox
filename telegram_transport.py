@@ -19,16 +19,20 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL = 3       # sekundy między kolejnymi getUpdates
-REQUEST_TIMEOUT = 10    # timeout pojedynczego żądania HTTP
+POLL_INTERVAL = 1        # sekundy między kolejnymi getUpdates (fallback po błędzie)
+LONG_POLL_TIMEOUT = 30   # Telegram trzyma połączenie otwarte — natychmiastowy push
+REQUEST_TIMEOUT = 35     # musi być > LONG_POLL_TIMEOUT
 
 
 class TelegramTransport:
     BASE = "https://api.telegram.org/bot{token}/{method}"
 
-    def __init__(self, bot_token: str):
+    def __init__(self, bot_token: str, last_update_id: int = 0,
+                 on_update_id_change=None):
         self.token = bot_token.strip()
-        self._last_update_id: int = 0
+        self._last_update_id: int = last_update_id
+        self._initialized: bool = last_update_id > 0  # jeśli mamy zapisany offset — od razu odbieramy
+        self._on_update_id_change = on_update_id_change  # callback(new_id) — zapis do settings
         self._polling_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         # callback(chat_id: str, text: str) wywoływany w wątku pollingu
@@ -119,11 +123,11 @@ class TelegramTransport:
         logger.info("Telegram polling started.")
 
     def stop_polling(self) -> None:
-        """Zatrzymaj wątek pollingu."""
+        """Zatrzymaj wątek pollingu (non-blocking)."""
         self._stop_event.set()
-        if self._polling_thread:
-            self._polling_thread.join(timeout=REQUEST_TIMEOUT + 2)
-        logger.info("Telegram polling stopped.")
+        # Nie czekamy na join() — wątek jest daemon, zakończy się sam.
+        # join() blokowałby GUI na REQUEST_TIMEOUT sekund przy każdym restarcie.
+        logger.info("Telegram polling stop requested.")
 
     @property
     def is_polling(self) -> bool:
@@ -135,19 +139,63 @@ class TelegramTransport:
                 self._fetch_updates()
             except Exception as e:
                 logger.warning(f"Polling error: {e}")
+            # Krótka przerwa tylko po błędzie — przy long pollingu getUpdates
+            # blokuje się sam przez LONG_POLL_TIMEOUT sekund
+            if self._stop_event.is_set():
+                break
             self._stop_event.wait(POLL_INTERVAL)
 
     def _fetch_updates(self) -> None:
+        if not self._initialized:
+            # INIT: pobierz wszystkie wiadomości które bot ma w kolejce (w tym "odczytane"
+            # przez Telegram Mobile) — dostarczamy je od razu zamiast pomijać.
+            # Używamy last_update_id+1 jeśli mamy zapisany offset, inaczej bez offsetu.
+            if self._last_update_id > 0:
+                init_params = {
+                    "offset": self._last_update_id + 1,
+                    "timeout": 0,
+                    "allowed_updates": ["message"],
+                }
+            else:
+                init_params = {
+                    "timeout": 0,
+                    "allowed_updates": ["message"],
+                }
+            data = self._get("getUpdates", init_params)
+            updates = data.get("result", [])
+            logger.debug(f"[TG] INIT getUpdates -> {len(updates)} updates (last_id={self._last_update_id})")
+            # Dostarcz wszystkie oczekujące wiadomości natychmiast
+            for update in updates:
+                uid = update.get("update_id", 0)
+                if uid > self._last_update_id:
+                    self._last_update_id = uid
+                    if self._on_update_id_change:
+                        self._on_update_id_change(self._last_update_id)
+                self._handle_update(update)
+            self._initialized = True
+            logger.debug(f"[TG] INIT done, last_update_id={self._last_update_id}")
+            return
+
+        # Normalny polling — long polling: Telegram trzyma połączenie do 30s
+        # i odpowiada natychmiast gdy przyjdzie nowa wiadomość
+        offset = self._last_update_id + 1
         params = {
-            "offset": self._last_update_id + 1,
-            "timeout": 0,
+            "offset": offset,
+            "timeout": LONG_POLL_TIMEOUT,
             "allowed_updates": ["message"],
         }
         data = self._get("getUpdates", params)
-        for update in data.get("result", []):
+        updates = data.get("result", [])
+        logger.debug(f"[TG] getUpdates offset={offset} -> {len(updates)} updates")
+        for u in updates:
+            logger.debug(f"[TG] raw update: {u}")
+
+        for update in updates:
             uid = update.get("update_id", 0)
             if uid > self._last_update_id:
                 self._last_update_id = uid
+                if self._on_update_id_change:
+                    self._on_update_id_change(self._last_update_id)
             self._handle_update(update)
 
     def _handle_update(self, update: dict) -> None:
@@ -156,5 +204,6 @@ class TelegramTransport:
             return
         text = msg.get("text", "").strip()
         chat_id = str(msg.get("chat", {}).get("id", ""))
+        logger.debug(f"[TG] update received: chat_id={chat_id!r}, text_len={len(text)}, has_callback={self.on_message is not None}")
         if text and chat_id and self.on_message:
             self.on_message(chat_id, text)

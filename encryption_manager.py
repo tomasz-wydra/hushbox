@@ -1,14 +1,19 @@
 """
 EncryptionManager - obsługuje klucze NaCl i szyfrowanie/deszyfrowanie wiadomości.
 
-contact_keys.json przechowuje teraz pełne dane kontaktu:
+contact_keys.json przechowuje pełne dane kontaktu:
 {
   "Jan Kowalski": {
     "public_key": "base64...",
-    "telegram_chat_id": "123456789",
-    "telegram_bot_token": "123:ABC..."
+    "telegram_bot_token": "token bota Jana (Jan Ci go podaje)",
+    "telegram_chat_id": "Chat ID Jana (Jan sprawdza przez @userinfobot)"
   }
 }
+
+Model Telegram: każdy użytkownik tworzy własnego bota i udostępnia
+swojemu kontaktowi: token bota + swoje Chat ID.
+Nadawca wysyła zaszyfrowany tekst przez bota ODBIORCY do Chat ID odbiorcy.
+Odbiorca polluje swojego własnego bota i automatycznie odbiera wiadomości.
 """
 from nacl.public import PrivateKey, PublicKey, Box
 from nacl.encoding import Base64Encoder
@@ -20,8 +25,8 @@ from dataclasses import dataclass, field, asdict
 @dataclass
 class ContactInfo:
     public_key: str
-    telegram_chat_id: str = ""        # chat_id odbiorcy (jego Telegram ID)
-    telegram_bot_token: str = ""      # token własnego bota (z BotFather)
+    telegram_bot_token: str = ""      # token bota kontaktu (kontakt Ci podaje)
+    telegram_chat_id: str = ""        # Chat ID kontaktu (kontakt sprawdza przez @userinfobot)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -90,8 +95,8 @@ class EncryptionManager:
         self.contact_keys = {n: c.public_key for n, c in self.contacts.items()}
 
     def add_contact(self, name: str, public_key_b64: str,
-                    telegram_chat_id: str = "",
-                    telegram_bot_token: str = "") -> None:
+                    telegram_bot_token: str = "",
+                    telegram_chat_id: str = "") -> None:
         """Dodaj lub zaktualizuj kontakt."""
         name = name.strip()
         if not name:

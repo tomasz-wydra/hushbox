@@ -26,6 +26,11 @@ from PIL import Image, ImageTk
 from encryption_manager import EncryptionManager
 from chat_store import ChatStore, Message
 from telegram_transport import TelegramTransport
+from app_settings import AppSettings
+
+import sys, logging
+if "--log" in sys.argv:
+    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(message)s")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -81,26 +86,28 @@ class ContactDialog(ctk.CTkToplevel):
                      font=FONT_SMALL, text_color="#888").pack()
 
         # ── Bot token ──
-        ctk.CTkLabel(self, text="Your Bot Token (from BotFather):", font=FONT_LABEL).pack(anchor="w", padx=20, pady=(4, 2))
+        ctk.CTkLabel(self, text="Contact's Bot Token (they get it from BotFather):", font=FONT_LABEL).pack(anchor="w", padx=20, pady=(4, 2))
         self.token_entry = ctk.CTkEntry(self, width=520,
-                                         placeholder_text="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ  (dummy for now)")
+                                         placeholder_text="Ask contact for their bot token, e.g. 123456789:ABCdef...")
         self.token_entry.pack(padx=20)
         if tg_token:
             self.token_entry.insert(0, tg_token)
 
         # ── Chat ID odbiorcy ──
-        chat_id_row = ctk.CTkFrame(self, fg_color="transparent")
-        chat_id_row.pack(fill="x", padx=20, pady=(10, 2))
-        ctk.CTkLabel(chat_id_row, text="Recipient's Telegram Chat ID:", font=FONT_LABEL).pack(side="left")
-        ctk.CTkLabel(chat_id_row, text=" (?)", font=FONT_SMALL,
-                     text_color="#888",
-                     cursor="hand2").pack(side="left")
+        ctk.CTkLabel(self, text="Contact's Telegram Chat ID (they check via @userinfobot):", font=FONT_LABEL).pack(anchor="w", padx=20, pady=(10, 2))
 
-        self.chat_id_entry = ctk.CTkEntry(self, width=520,
-                                           placeholder_text="e.g. 123456789  — ask contact to send /start to your bot")
-        self.chat_id_entry.pack(padx=20)
+        chat_id_row = ctk.CTkFrame(self, fg_color="transparent")
+        chat_id_row.pack(fill="x", padx=20)
+
+        self.chat_id_entry = ctk.CTkEntry(chat_id_row,
+                                           placeholder_text="Ask contact for their Chat ID (from @userinfobot), e.g. 123456789")
+        self.chat_id_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
         if tg_chat_id:
             self.chat_id_entry.insert(0, tg_chat_id)
+
+        self._detect_btn = ctk.CTkButton(chat_id_row, text="🔍 Detect", width=90,
+                                          fg_color="#2a5298", command=self._detect_chat_id)
+        self._detect_btn.pack(side="right")
 
         # ── Przyciski ──
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -110,6 +117,42 @@ class ContactDialog(ctk.CTkToplevel):
                       fg_color="#555", command=self.destroy).pack(side="left", padx=10)
 
         self.name_entry.focus()
+
+    def _detect_chat_id(self):
+        """Pobierz Chat ID ostatniej osoby która napisała /start do bota."""
+        token = self.token_entry.get().strip()
+        if not token:
+            messagebox.showwarning("No token",
+                "Enter Bot Token first, then ask your contact to send /start to your bot.",
+                parent=self)
+            return
+        self._detect_btn.configure(text="⏳...", state="disabled")
+        import threading
+        def _do():
+            try:
+                from telegram_transport import TelegramTransport
+                tg = TelegramTransport(token)
+                chat_id = tg.get_my_chat_id()
+                self.after(0, lambda: self._on_detected(chat_id))
+            except Exception as e:
+                self.after(0, lambda err=e: self._on_detect_error(err))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _on_detected(self, chat_id: str | None):
+        self._detect_btn.configure(text="🔍 Detect", state="normal")
+        if chat_id:
+            self.chat_id_entry.delete(0, "end")
+            self.chat_id_entry.insert(0, chat_id)
+            messagebox.showinfo("Chat ID detected",
+                f"Chat ID set to: {chat_id}", parent=self)
+        else:
+            messagebox.showwarning("Not found",
+                "No messages found.\nAsk your contact to send /start to your bot first.",
+                parent=self)
+
+    def _on_detect_error(self, err: Exception):
+        self._detect_btn.configure(text="🔍 Detect", state="normal")
+        messagebox.showerror("Error", f"Could not fetch Chat ID:\n{err}", parent=self)
 
     def _save(self):
         name      = self.name_entry.get().strip()
@@ -182,7 +225,7 @@ class ReceivePanel(ctk.CTkFrame):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x")
         ctk.CTkLabel(header, text="📥 Receive encrypted message", font=FONT_LABEL).pack(side="left", padx=6)
-        self._toggle_btn = ctk.CTkButton(header, text="▲ expand", width=90,
+        self._toggle_btn = ctk.CTkButton(header, text="▼ expand", width=90,
                                           fg_color="#444", command=self._toggle)
         self._toggle_btn.pack(side="right", padx=6)
 
@@ -204,10 +247,10 @@ class ReceivePanel(ctk.CTkFrame):
     def _toggle(self):
         if self._body_visible:
             self._body.pack_forget()
-            self._toggle_btn.configure(text="▲ expand")
+            self._toggle_btn.configure(text="▼ expand")
         else:
             self._body.pack(fill="x")
-            self._toggle_btn.configure(text="▼ collapse")
+            self._toggle_btn.configure(text="▲ collapse")
             self.cipher_entry.focus()
         self._body_visible = not self._body_visible
 
@@ -455,6 +498,7 @@ class ContactSidebar(ctk.CTkFrame):
     def _build(self):
         ctk.CTkLabel(self, text="Contacts", font=FONT_TITLE).pack(pady=(16, 8))
 
+        # przycisk na dole — pakowany PRZED ScrollableFrame, żeby nie był przykryty
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(side="bottom", fill="x", padx=6, pady=8)
         ctk.CTkButton(btn_frame, text="+ Add contact",
@@ -513,6 +557,63 @@ class ContactSidebar(ctk.CTkFrame):
 
 
 # ─────────────────────────────────────────────────────────────────
+# Okno ustawień aplikacji
+# ─────────────────────────────────────────────────────────────────
+class SettingsWindow(ctk.CTkToplevel):
+    """Globalane ustawienia aplikacji — m.in. własny token Telegram."""
+
+    def __init__(self, parent, settings: AppSettings, on_save_cb):
+        super().__init__(parent)
+        self.title("Settings")
+        self.geometry("540x280")
+        self.resizable(False, False)
+        self.grab_set()
+        self._settings = settings
+        self._on_save = on_save_cb
+
+        # ── Sekcja Telegram ──
+        ctk.CTkLabel(self, text="Telegram", font=FONT_TITLE).pack(anchor="w", padx=20, pady=(20, 4))
+
+        ctk.CTkLabel(
+            self,
+            text="Your Bot Token — contacts send messages TO your bot, you receive them automatically.",
+            font=FONT_SMALL, text_color="#aaa", wraplength=500, justify="left",
+        ).pack(anchor="w", padx=20)
+
+        token_row = ctk.CTkFrame(self, fg_color="transparent")
+        token_row.pack(fill="x", padx=20, pady=(8, 0))
+
+        ctk.CTkLabel(token_row, text="My Bot Token:", font=FONT_LABEL, width=130).pack(side="left")
+        self._token_entry = ctk.CTkEntry(
+            token_row, placeholder_text="123456789:ABCdef...  (from BotFather)"
+        )
+        self._token_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        if settings.my_bot_token:
+            self._token_entry.insert(0, settings.my_bot_token)
+
+        ctk.CTkLabel(
+            self,
+            text="Get it from @BotFather → /newbot. Share your bot name (not the token!) with contacts.",
+            font=FONT_SMALL, text_color="#666", wraplength=500, justify="left",
+        ).pack(anchor="w", padx=20, pady=(6, 0))
+
+        # ── Przyciski ──
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(pady=24)
+        ctk.CTkButton(btn_frame, text="Save", width=120, command=self._save).pack(side="left", padx=10)
+        ctk.CTkButton(btn_frame, text="Cancel", width=120,
+                      fg_color="#555", command=self.destroy).pack(side="left", padx=10)
+
+        self._token_entry.focus()
+
+    def _save(self):
+        token = self._token_entry.get().strip()
+        self._settings.my_bot_token = token
+        self._on_save()
+        self.destroy()
+
+
+# ─────────────────────────────────────────────────────────────────
 # Menadżer pollerów Telegram (jeden per kontakt)
 # ─────────────────────────────────────────────────────────────────
 class TelegramPollerManager:
@@ -522,10 +623,13 @@ class TelegramPollerManager:
         self._pollers: dict[str, TelegramTransport] = {}
 
     def start(self, contact_name: str, bot_token: str,
-              on_message_cb) -> None:
+              on_message_cb, last_update_id: int = 0,
+              on_update_id_change=None) -> None:
         """Uruchom polling dla kontaktu. Jeśli już działa — zrestartuj."""
         self.stop(contact_name)
-        tg = TelegramTransport(bot_token)
+        tg = TelegramTransport(bot_token,
+                               last_update_id=last_update_id,
+                               on_update_id_change=on_update_id_change)
         tg.on_message = lambda chat_id, text: on_message_cb(contact_name, chat_id, text)
         tg.start_polling()
         self._pollers[contact_name] = tg
@@ -555,14 +659,15 @@ class HushboxApp(ctk.CTk):
         self.minsize(900, 580)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self._enc    = EncryptionManager(data_dir=DATA_DIR)
-        self._store  = ChatStore(data_dir=DATA_DIR)
-        self._pollers = TelegramPollerManager()
+        self._enc      = EncryptionManager(data_dir=DATA_DIR)
+        self._store    = ChatStore(data_dir=DATA_DIR)
+        self._settings = AppSettings(data_dir=DATA_DIR)
+        self._pollers  = TelegramPollerManager()
         self._tabs: dict[str, ChatTab] = {}
 
         self._build_layout()
         self._refresh_contacts()
-        self._start_all_pollers()
+        self._start_my_poller()
 
     # ── Layout ───────────────────────────────────────────────────
 
@@ -581,6 +686,9 @@ class HushboxApp(ctk.CTk):
         ctk.CTkButton(top, text="📷 Import QR", width=120,
                       fg_color="#555",
                       command=self._import_qr).pack(side="right", padx=2, pady=5)
+        ctk.CTkButton(top, text="⚙ Settings", width=100,
+                      fg_color="#555",
+                      command=self._open_settings).pack(side="right", padx=2, pady=5)
 
         # Status bar Telegram (dolny pasek)
         self._status_var = tk.StringVar(value="")
@@ -723,29 +831,57 @@ class HushboxApp(ctk.CTk):
 
     # ── Telegram polling ─────────────────────────────────────────
 
-    def _start_all_pollers(self):
-        for name in self._enc.list_contacts():
-            self._restart_poller(name)
+    def _start_my_poller(self):
+        """Uruchom polling na własnym bocie (odbiór wiadomości od kontaktów)."""
+        token = self._settings.my_bot_token
+        if token:
+            self._pollers.start(
+                "__self__", token, self._on_tg_message,
+                last_update_id=self._settings.last_update_id,
+                on_update_id_change=lambda uid: setattr(self._settings, "last_update_id", uid),
+            )
+            self._set_status("Telegram: receiving on your bot")
+        else:
+            self._set_status("Telegram: set your Bot Token in ⚙ Settings to enable auto-receive")
 
     def _restart_poller(self, name: str):
-        try:
-            c = self._enc.get_contact(name)
-        except KeyError:
-            return
-        if c.telegram_bot_token:
-            self._pollers.start(name, c.telegram_bot_token, self._on_tg_message)
-            self._set_status(f"Telegram polling active for {len(self._enc.list_contacts())} contact(s)")
+        """Polling odbywa się tylko na własnym bocie — nie per kontakt."""
+        pass
+
+    def _open_settings(self):
+        SettingsWindow(self, self._settings, on_save_cb=self._on_settings_saved)
+
+    def _on_settings_saved(self):
+        self._pollers.stop_all()
+        self._start_my_poller()
 
     def _on_tg_message(self, contact_name: str, chat_id: str, cipher_text: str):
         """Callback z wątku pollingu — musi delegować do GUI przez after()."""
         self.after(0, lambda: self._dispatch_tg_message(contact_name, chat_id, cipher_text))
 
     def _dispatch_tg_message(self, contact_name: str, chat_id: str, cipher_text: str):
-        # Otwórz zakładkę jeśli nie otwarta
-        if contact_name not in self._tabs:
-            self._open_chat(contact_name)
-        self._tabs[contact_name].on_telegram_message(cipher_text)
-        self._set_status(f"New Telegram message from {contact_name}")
+        # znajdź kontakt po chat_id nadawcy, ignorując contact_name z pollera
+        # (jeden bot może odbierać od wielu kontaktów)
+        resolved = self._resolve_contact_by_chat_id(chat_id) or contact_name
+        if resolved not in self._tabs:
+            self._open_chat(resolved)
+        self._tabs[resolved].on_telegram_message(cipher_text)
+        self._set_status(f"New Telegram message from {resolved}")
+
+    def _resolve_contact_by_chat_id(self, chat_id: str) -> str | None:
+        """Znajdź nazwę kontaktu na podstawie jego telegram_chat_id."""
+        import logging
+        log = logging.getLogger(__name__)
+        for name in self._enc.list_contacts():
+            try:
+                stored = self._enc.get_contact(name).telegram_chat_id
+                log.debug(f"[TG] resolve: contact={name!r}, stored_chat_id={stored!r}, incoming={chat_id!r}, match={stored == chat_id}")
+                if stored == chat_id:
+                    return name
+            except Exception:
+                pass
+        log.warning(f"[TG] no contact found for chat_id={chat_id!r}")
+        return None
 
     def _set_status(self, text: str):
         self._status_var.set(f"  {text}")

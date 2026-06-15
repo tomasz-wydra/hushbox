@@ -133,33 +133,68 @@ pytest tests/ -v
 
 ## Telegram integration
 
-Hushbox can deliver encrypted messages automatically via Telegram — no manual copy-paste needed.
-Each user runs their own bot, so no third party has access to the token or messages.
-
-### Setup (one-time, per contact)
-
-1. Open Telegram and message [@BotFather](https://t.me/BotFather)
-2. Send `/newbot`, follow the prompts → copy the **Bot Token**
-3. In Hushbox, open a contact's edit dialog (**⋮ → Edit**)
-4. Paste your **Bot Token** and the contact's **Chat ID**
-   - To get the Chat ID: ask your contact to send `/start` to your bot — Hushbox reads it automatically
-5. Save — the **✈ Telegram** button activates in that conversation
+Hushbox can send and receive encrypted messages automatically via Telegram — no manual copy-paste needed.
+Each user creates their own bot. Telegram sees only the encrypted blob, never the content.
 
 ### How it works
 
 ```
-[Alice]  types message
-   ↓  Hushbox encrypts (NaCl)
-   ↓  sends ciphertext via Alice's bot → Telegram servers → Bob's phone
-[Bob]    Hushbox polls his bot → receives ciphertext → decrypts automatically
+Alice types message
+  ↓ Hushbox encrypts (NaCl/Curve25519)
+  ↓ sends ciphertext via Bob's bot → Telegram → Bob's Hushbox
+  ↓ Bob's Hushbox polls Bob's bot → decrypts automatically
 ```
 
-Telegram sees only the encrypted blob. The `✈` badge in chat history marks messages sent/received via Telegram.
+Each person sends through the **recipient's bot** and receives on **their own bot**.
+This means both sides get fully automatic delivery.
 
-### requirements
+### What each user needs to prepare
+
+Every user creates one bot and shares two things with each contact:
+
+| What | How to get it |
+|---|---|
+| **Bot Token** | Message [@BotFather](https://t.me/BotFather), send `/newbot`, copy the token |
+| **Chat ID** | Message [@getmyid_bot](https://t.me/getmyid_bot) — it replies instantly with your numeric ID. Alternatives: [@JsonDumpBot](https://t.me/JsonDumpBot) or [@RawDataBot](https://t.me/RawDataBot) |
+
+### Setup in Hushbox (one-time, per contact)
+
+When both Alice and Bob want full two-way Telegram delivery:
+
+**Alice** opens Bob's contact (**⋮ → Edit**) and fills in:
+- **Contact's Bot Token** — Bob's bot token (Bob gives this to Alice)
+- **Contact's Chat ID** — Bob's Chat ID (Bob checks via @userinfobot)
+
+**Bob** opens Alice's contact (**⋮ → Edit**) and fills in:
+- **Contact's Bot Token** — Alice's bot token (Alice gives this to Bob)
+- **Contact's Chat ID** — Alice's Chat ID (Alice checks via @userinfobot)
+
+Once saved, the **✈ Telegram** button activates and incoming messages appear automatically.
+
+### What to share with each contact
+
+Send your contact these three things (e.g. over any messenger):
+
+```
+My Hushbox public key:  <base64 from 📱 My QR button>
+My bot token:           123456789:ABCdef...
+My Chat ID:             987654321
+```
+
+They enter your token and Chat ID in your contact entry in their Hushbox.
+You enter their token and Chat ID in their contact entry in your Hushbox.
+
+### One-way vs two-way
+
+| Setup | Result |
+|---|---|
+| Only you create a bot | Your contacts can write to you automatically, you send manually (clipboard) |
+| Both sides create a bot | Fully automatic in both directions |
+
+### Additional dependency
 
 ```bash
-pip install python-telegram-bot==22.*
+pip install python-telegram-bot==20.*
 ```
 
 ---
