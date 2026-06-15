@@ -182,9 +182,13 @@ class TestPolling:
             tg.stop_polling()
 
     def test_stop_polling_clears_is_polling(self, tg):
+        # stop_polling() jest non-blocking (bez join()) — wątek kończy się asynchronicznie.
+        # Czekamy max 2s na faktyczne zakończenie wątku.
         with patch.object(tg, "_fetch_updates"):
             tg.start_polling()
             tg.stop_polling()
+            if tg._polling_thread:
+                tg._polling_thread.join(timeout=2)
             assert not tg.is_polling
 
     def test_double_start_does_not_create_second_thread(self, tg):
