@@ -12,7 +12,7 @@ Układ:
   │  [kontakt 2] ⋮       │  ├──────────────────────────────────┤│
   │  ...                 │  │  [▼ Odbierz]  (zwijany panel)    ││
   │                      │  ├──────────────────────────────────┤│
-  │                      │  │  [input]  [Wyślij 🔒] [Telegram] ││
+  │                      │  │  [input]  [Wyślij 🔒] [Send 📡]  ││
   └──────────────────────┴──────────────────────────────────────┘
 """
 
@@ -23,14 +23,8 @@ from tkinter import messagebox
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
-from encryption_manager import EncryptionManager
-from chat_store import ChatStore, Message
-from telegram_transport import TelegramTransport
-from app_settings import AppSettings
-
-import sys, logging
-if "--log" in sys.argv:
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(message)s")
+from hushbox_core import EncryptionManager, ChatStore, Message, RelayTransport, pubkey_to_hash, AppSettings
+from hushbox_core.encryption_manager import ContactInfo
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -44,7 +38,7 @@ FONT_SMALL  = ("Segoe UI", 10)
 COLOR_SENT   = "#1a6b3c"
 COLOR_RECV   = "#4fa3e3"
 COLOR_CIPHER = "#555555"
-COLOR_TG     = "#2196a8"   # akcent dla Telegram
+COLOR_RELAY  = "#8e44ad"   # akcent dla relay
 
 DATA_DIR = "."
 
@@ -53,17 +47,17 @@ DATA_DIR = "."
 # Dialog dodawania / edycji kontaktu
 # ─────────────────────────────────────────────────────────────────
 class ContactDialog(ctk.CTkToplevel):
-    """Modal do dodawania / edytowania kontaktu (klucz + dane Telegram)."""
+    """Modal do dodawania / edytowania kontaktu (klucz + relay URL)."""
 
     def __init__(self, parent, title: str,
                  name: str = "", key: str = "",
-                 tg_token: str = "", tg_chat_id: str = ""):
+                 relay_url: str = ""):
         super().__init__(parent)
         self.title(title)
-        self.geometry("560x480")
+        self.geometry("560x400")
         self.resizable(False, False)
         self.grab_set()
-        self.result: tuple | None = None   # (name, key, tg_token, tg_chat_id)
+        self.result: tuple | None = None   # (name, key, relay_url)
 
         # ── Nazwa ──
         ctk.CTkLabel(self, text="Contact name:", font=FONT_LABEL).pack(anchor="w", padx=20, pady=(20, 2))
@@ -79,86 +73,33 @@ class ContactDialog(ctk.CTkToplevel):
         if key:
             self.key_entry.insert(0, key)
 
-        # ── Separator Telegram ──
+        # ── Separator relay ──
         sep_frame = ctk.CTkFrame(self, fg_color="transparent")
         sep_frame.pack(fill="x", padx=20, pady=(18, 4))
-        ctk.CTkLabel(sep_frame, text="── Telegram (optional) ──",
+        ctk.CTkLabel(sep_frame, text="── Relay (optional — overrides global setting) ──",
                      font=FONT_SMALL, text_color="#888").pack()
 
-        # ── Bot token ──
-        ctk.CTkLabel(self, text="Contact's Bot Token (they get it from BotFather):", font=FONT_LABEL).pack(anchor="w", padx=20, pady=(4, 2))
-        self.token_entry = ctk.CTkEntry(self, width=520,
-                                         placeholder_text="Ask contact for their bot token, e.g. 123456789:ABCdef...")
-        self.token_entry.pack(padx=20)
-        if tg_token:
-            self.token_entry.insert(0, tg_token)
-
-        # ── Chat ID odbiorcy ──
-        ctk.CTkLabel(self, text="Contact's Telegram Chat ID (they check via @userinfobot):", font=FONT_LABEL).pack(anchor="w", padx=20, pady=(10, 2))
-
-        chat_id_row = ctk.CTkFrame(self, fg_color="transparent")
-        chat_id_row.pack(fill="x", padx=20)
-
-        self.chat_id_entry = ctk.CTkEntry(chat_id_row,
-                                           placeholder_text="Ask contact for their Chat ID (from @userinfobot), e.g. 123456789")
-        self.chat_id_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        if tg_chat_id:
-            self.chat_id_entry.insert(0, tg_chat_id)
-
-        self._detect_btn = ctk.CTkButton(chat_id_row, text="🔍 Detect", width=90,
-                                          fg_color="#2a5298", command=self._detect_chat_id)
-        self._detect_btn.pack(side="right")
+        # ── Relay URL override per kontakt ──
+        ctk.CTkLabel(self, text="Relay URL (leave empty to use global):", font=FONT_LABEL).pack(anchor="w", padx=20, pady=(4, 2))
+        self.relay_entry = ctk.CTkEntry(self, width=520,
+                                         placeholder_text="https://relay.twoja-domena.pl")
+        self.relay_entry.pack(padx=20)
+        if relay_url:
+            self.relay_entry.insert(0, relay_url)
 
         # ── Przyciski ──
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(pady=20)
+        btn_frame.pack(pady=24)
         ctk.CTkButton(btn_frame, text="Save", width=120, command=self._save).pack(side="left", padx=10)
         ctk.CTkButton(btn_frame, text="Cancel", width=120,
                       fg_color="#555", command=self.destroy).pack(side="left", padx=10)
 
         self.name_entry.focus()
 
-    def _detect_chat_id(self):
-        """Pobierz Chat ID ostatniej osoby która napisała /start do bota."""
-        token = self.token_entry.get().strip()
-        if not token:
-            messagebox.showwarning("No token",
-                "Enter Bot Token first, then ask your contact to send /start to your bot.",
-                parent=self)
-            return
-        self._detect_btn.configure(text="⏳...", state="disabled")
-        import threading
-        def _do():
-            try:
-                from telegram_transport import TelegramTransport
-                tg = TelegramTransport(token)
-                chat_id = tg.get_my_chat_id()
-                self.after(0, lambda: self._on_detected(chat_id))
-            except Exception as e:
-                self.after(0, lambda err=e: self._on_detect_error(err))
-        threading.Thread(target=_do, daemon=True).start()
-
-    def _on_detected(self, chat_id: str | None):
-        self._detect_btn.configure(text="🔍 Detect", state="normal")
-        if chat_id:
-            self.chat_id_entry.delete(0, "end")
-            self.chat_id_entry.insert(0, chat_id)
-            messagebox.showinfo("Chat ID detected",
-                f"Chat ID set to: {chat_id}", parent=self)
-        else:
-            messagebox.showwarning("Not found",
-                "No messages found.\nAsk your contact to send /start to your bot first.",
-                parent=self)
-
-    def _on_detect_error(self, err: Exception):
-        self._detect_btn.configure(text="🔍 Detect", state="normal")
-        messagebox.showerror("Error", f"Could not fetch Chat ID:\n{err}", parent=self)
-
     def _save(self):
         name      = self.name_entry.get().strip()
         key       = self.key_entry.get().strip()
-        tg_token  = self.token_entry.get().strip()
-        tg_chat   = self.chat_id_entry.get().strip()
+        relay_url = self.relay_entry.get().strip()
 
         if not name:
             messagebox.showerror("Error", "Contact name is required.", parent=self)
@@ -166,7 +107,7 @@ class ContactDialog(ctk.CTkToplevel):
         if not key:
             messagebox.showerror("Error", "Public key is required.", parent=self)
             return
-        self.result = (name, key, tg_token, tg_chat)
+        self.result = (name, key, relay_url)
         self.destroy()
 
 
@@ -265,12 +206,12 @@ class ChatTab(ctk.CTkFrame):
     def __init__(self, parent, contact_name: str,
                  enc_manager: EncryptionManager,
                  chat_store: ChatStore,
-                 tg_transport: "TelegramTransport | None"):
+                 relay: "RelayTransport | None"):
         super().__init__(parent, fg_color="transparent")
         self.contact_name = contact_name
-        self._enc = enc_manager
+        self._enc   = enc_manager
         self._store = chat_store
-        self._tg = tg_transport
+        self._relay = relay
         self._build_ui()
         self._load_history()
 
@@ -286,7 +227,7 @@ class ChatTab(ctk.CTkFrame):
         tb.tag_configure("recv_text",   foreground=COLOR_RECV)
         tb.tag_configure("cipher_text", foreground=COLOR_CIPHER, font=(FONT_MONO[0], 9))
         tb.tag_configure("timestamp",   foreground="#888888",    font=(FONT_SMALL[0], 9))
-        tb.tag_configure("tg_badge",    foreground=COLOR_TG,     font=(FONT_SMALL[0], 9))
+        tb.tag_configure("relay_badge", foreground=COLOR_RELAY,  font=(FONT_SMALL[0], 9))
         tb.tag_configure("system_msg",  foreground="#cc8800",    font=(FONT_SMALL[0], 10, "italic"))
 
         # ── Panel odbierania ──
@@ -310,13 +251,13 @@ class ChatTab(ctk.CTkFrame):
         )
         self._send_btn.pack(side="left", padx=(0, 4))
 
-        self._tg_btn = ctk.CTkButton(
-            input_frame, text="✈ Telegram", width=110,
-            fg_color=COLOR_TG, hover_color="#187a85",
-            command=self._send_telegram,
+        self._relay_btn = ctk.CTkButton(
+            input_frame, text="Send 📡", width=100,
+            fg_color=COLOR_RELAY, hover_color="#6c3483",
+            command=self._send_relay,
         )
-        self._tg_btn.pack(side="left")
-        self._update_tg_button_state()
+        self._relay_btn.pack(side="left")
+        self._update_relay_button_state()
 
     # ── Ładowanie historii ──────────────────────────────────────
 
@@ -331,19 +272,19 @@ class ChatTab(ctk.CTkFrame):
         tb = self.history._textbox
         self.history.configure(state="normal")
 
-        via = " [TG]" if getattr(msg, "via_telegram", False) else ""
+        via = " [📡]" if getattr(msg, "via_telegram", False) else ""
 
         if msg.direction == "out":
             tb.insert("end", f"[{msg.timestamp}]", "timestamp")
             if via:
-                tb.insert("end", via, "tg_badge")
+                tb.insert("end", via, "relay_badge")
             tb.insert("end", " You: ", "sent_label")
             tb.insert("end", f"{msg.plaintext}\n", "sent_text")
             tb.insert("end", f"  ╰─ {msg.ciphertext}\n", "cipher_text")
         else:
             tb.insert("end", f"[{msg.timestamp}]", "timestamp")
             if via:
-                tb.insert("end", via, "tg_badge")
+                tb.insert("end", via, "relay_badge")
             tb.insert("end", f" {self.contact_name}: ", "recv_label")
             tb.insert("end", f"{msg.plaintext}\n", "recv_text")
 
@@ -379,22 +320,22 @@ class ChatTab(ctk.CTkFrame):
         self.clipboard_append(cipher)
         self._flash_btn(self._send_btn, "✓ Copied!", "#1a6b3c", "Send 🔒")
 
-    # ── Wysyłanie — Telegram ────────────────────────────────────
+    # ── Wysyłanie — relay ───────────────────────────────────────
 
-    def _send_telegram(self):
+    def _send_relay(self):
         text = self.msg_entry.get().strip()
         if not text:
             return
 
-        contact = self._enc.get_contact(self.contact_name)
-        if not contact.telegram_bot_token or not contact.telegram_chat_id:
+        if not self._relay:
             messagebox.showwarning(
-                "Telegram not configured",
-                f"Set Bot Token and Chat ID for '{self.contact_name}'\n"
-                "in the contact edit dialog (⋮ → Edit).",
+                "Relay not configured",
+                "Set Relay URL in ⚙ Settings to enable automatic delivery.",
                 parent=self,
             )
             return
+
+        contact = self._enc.get_contact(self.contact_name)
 
         try:
             cipher = self._enc.encrypt(self.contact_name, text)
@@ -404,29 +345,31 @@ class ChatTab(ctk.CTkFrame):
 
         def _do_send():
             try:
-                tg = TelegramTransport(contact.telegram_bot_token)
-                tg.send(contact.telegram_chat_id, cipher)
+                self._relay.send(
+                    recipient_pubkey_b64=contact.public_key,
+                    payload=cipher,
+                    sender_pubkey_b64=self._enc.export_public_key(),
+                )
                 msg = Message(direction="out", plaintext=text,
                               ciphertext=cipher, via_telegram=True)
                 self._store.add_message(self.contact_name, msg)
-                # GUI update musi być w głównym wątku
-                self.after(0, lambda: self._on_tg_sent(msg))
+                self.after(0, lambda: self._on_relay_sent(msg))
             except Exception as e:
-                self.after(0, lambda err=e: self._render_system(f"Telegram error: {err}"))
+                self.after(0, lambda err=e: self._render_system(f"Relay error: {err}"))
 
         threading.Thread(target=_do_send, daemon=True).start()
         self.msg_entry.delete(0, "end")
-        self._flash_btn(self._tg_btn, "⏳ Sending...", "#555", "✈ Telegram",
-                        restore_color=COLOR_TG)
+        self._flash_btn(self._relay_btn, "⏳ Sending...", "#555", "Send 📡",
+                        restore_color=COLOR_RELAY)
 
-    def _on_tg_sent(self, msg: Message):
+    def _on_relay_sent(self, msg: Message):
         self._render_message(msg)
-        self._flash_btn(self._tg_btn, "✓ Sent!", "#1a6b3c", "✈ Telegram",
-                        restore_color=COLOR_TG)
+        self._flash_btn(self._relay_btn, "✓ Sent!", "#1a6b3c", "Send 📡",
+                        restore_color=COLOR_RELAY)
 
     # ── Odbieranie (deszyfrowanie) ───────────────────────────────
 
-    def _handle_decrypt(self, cipher_text: str, via_telegram: bool = False):
+    def _handle_decrypt(self, cipher_text: str, via_relay: bool = False):
         cipher_text = cipher_text.strip()
         if not cipher_text:
             return
@@ -437,32 +380,30 @@ class ChatTab(ctk.CTkFrame):
             return
 
         msg = Message(direction="in", plaintext=plaintext,
-                      ciphertext=cipher_text, via_telegram=via_telegram)
+                      ciphertext=cipher_text, via_telegram=via_relay)
         self._store.add_message(self.contact_name, msg)
         self._render_message(msg)
         self._receive_panel.clear()
 
-    # ── Telegram polling callback ────────────────────────────────
+    # ── Relay polling callback ───────────────────────────────────
 
-    def on_telegram_message(self, cipher_text: str):
+    def on_relay_message(self, cipher_text: str):
         """Wywoływane z wątku pollingu gdy przyjdzie nowa wiadomość."""
-        self.after(0, lambda: self._handle_decrypt(cipher_text, via_telegram=True))
+        self.after(0, lambda: self._handle_decrypt(cipher_text, via_relay=True))
 
     # ── Helpers ──────────────────────────────────────────────────
 
-    def _update_tg_button_state(self):
-        try:
-            c = self._enc.get_contact(self.contact_name)
-            configured = bool(c.telegram_bot_token and c.telegram_chat_id)
-        except Exception:
-            configured = False
-        self._tg_btn.configure(
+    def _update_relay_button_state(self):
+        # przycisk relay aktywny gdy jest relay transport
+        configured = self._relay is not None
+        self._relay_btn.configure(
             state="normal" if configured else "disabled",
-            fg_color=COLOR_TG if configured else "#444",
+            fg_color=COLOR_RELAY if configured else "#444",
         )
 
-    def refresh_tg_state(self):
-        self._update_tg_button_state()
+    def refresh_relay_state(self, relay: "RelayTransport | None"):
+        self._relay = relay
+        self._update_relay_button_state()
 
     def _flash_btn(self, btn, temp_text, temp_color, orig_text,
                    restore_color=None, delay=1800):
@@ -498,7 +439,6 @@ class ContactSidebar(ctk.CTkFrame):
     def _build(self):
         ctk.CTkLabel(self, text="Contacts", font=FONT_TITLE).pack(pady=(16, 8))
 
-        # przycisk na dole — pakowany PRZED ScrollableFrame, żeby nie był przykryty
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(side="bottom", fill="x", padx=6, pady=8)
         ctk.CTkButton(btn_frame, text="+ Add contact",
@@ -507,7 +447,7 @@ class ContactSidebar(ctk.CTkFrame):
         self._list_frame = ctk.CTkScrollableFrame(self, label_text="")
         self._list_frame.pack(fill="both", expand=True, padx=6, pady=4)
 
-    def refresh(self, contacts: list[str], tg_status: dict[str, bool],
+    def refresh(self, contacts: list[str], relay_status: dict[str, bool],
                 active: str | None = None):
         for w in self._list_frame.winfo_children():
             w.destroy()
@@ -517,9 +457,8 @@ class ContactSidebar(ctk.CTkFrame):
             row = ctk.CTkFrame(self._list_frame, fg_color="transparent")
             row.pack(fill="x", pady=1)
 
-            # ikona Telegram jeśli skonfigurowany
-            tg_icon = " ✈" if tg_status.get(name) else ""
-            label = f"{name}{tg_icon}"
+            relay_icon = " 📡" if relay_status.get(name) else ""
+            label = f"{name}{relay_icon}"
 
             btn = ctk.CTkButton(
                 row, text=label, anchor="w",
@@ -560,7 +499,7 @@ class ContactSidebar(ctk.CTkFrame):
 # Okno ustawień aplikacji
 # ─────────────────────────────────────────────────────────────────
 class SettingsWindow(ctk.CTkToplevel):
-    """Globalane ustawienia aplikacji — m.in. własny token Telegram."""
+    """Globalne ustawienia aplikacji — relay URL."""
 
     def __init__(self, parent, settings: AppSettings, on_save_cb):
         super().__init__(parent)
@@ -569,31 +508,31 @@ class SettingsWindow(ctk.CTkToplevel):
         self.resizable(False, False)
         self.grab_set()
         self._settings = settings
-        self._on_save = on_save_cb
+        self._on_save  = on_save_cb
 
-        # ── Sekcja Telegram ──
-        ctk.CTkLabel(self, text="Telegram", font=FONT_TITLE).pack(anchor="w", padx=20, pady=(20, 4))
+        # ── Sekcja Relay ──
+        ctk.CTkLabel(self, text="Relay Server", font=FONT_TITLE).pack(anchor="w", padx=20, pady=(20, 4))
 
         ctk.CTkLabel(
             self,
-            text="Your Bot Token — contacts send messages TO your bot, you receive them automatically.",
+            text="Messages are delivered via your own relay server — no Telegram required.",
             font=FONT_SMALL, text_color="#aaa", wraplength=500, justify="left",
         ).pack(anchor="w", padx=20)
 
-        token_row = ctk.CTkFrame(self, fg_color="transparent")
-        token_row.pack(fill="x", padx=20, pady=(8, 0))
+        url_row = ctk.CTkFrame(self, fg_color="transparent")
+        url_row.pack(fill="x", padx=20, pady=(8, 0))
 
-        ctk.CTkLabel(token_row, text="My Bot Token:", font=FONT_LABEL, width=130).pack(side="left")
-        self._token_entry = ctk.CTkEntry(
-            token_row, placeholder_text="123456789:ABCdef...  (from BotFather)"
+        ctk.CTkLabel(url_row, text="Relay URL:", font=FONT_LABEL, width=100).pack(side="left")
+        self._url_entry = ctk.CTkEntry(
+            url_row, placeholder_text="https://relay.twoja-domena.pl"
         )
-        self._token_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
-        if settings.my_bot_token:
-            self._token_entry.insert(0, settings.my_bot_token)
+        self._url_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        if settings.relay_url:
+            self._url_entry.insert(0, settings.relay_url)
 
         ctk.CTkLabel(
             self,
-            text="Get it from @BotFather → /newbot. Share your bot name (not the token!) with contacts.",
+            text="Run docker-compose up -d in the relay_server/ directory to start your relay.",
             font=FONT_SMALL, text_color="#666", wraplength=500, justify="left",
         ).pack(anchor="w", padx=20, pady=(6, 0))
 
@@ -604,48 +543,51 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkButton(btn_frame, text="Cancel", width=120,
                       fg_color="#555", command=self.destroy).pack(side="left", padx=10)
 
-        self._token_entry.focus()
+        self._url_entry.focus()
 
     def _save(self):
-        token = self._token_entry.get().strip()
-        self._settings.my_bot_token = token
+        self._settings.relay_url = self._url_entry.get().strip()
         self._on_save()
         self.destroy()
 
 
 # ─────────────────────────────────────────────────────────────────
-# Menadżer pollerów Telegram (jeden per kontakt)
+# Menadżer pollera relay
 # ─────────────────────────────────────────────────────────────────
-class TelegramPollerManager:
-    """Zarządza wątkami pollingu dla wielu kontaktów jednocześnie."""
+class RelayPollerManager:
+    """Zarządza pojedynczym wątkiem long-polling relay."""
 
     def __init__(self):
-        self._pollers: dict[str, TelegramTransport] = {}
+        self._transport: RelayTransport | None = None
 
-    def start(self, contact_name: str, bot_token: str,
-              on_message_cb, last_update_id: int = 0,
-              on_update_id_change=None) -> None:
-        """Uruchom polling dla kontaktu. Jeśli już działa — zrestartuj."""
-        self.stop(contact_name)
-        tg = TelegramTransport(bot_token,
-                               last_update_id=last_update_id,
-                               on_update_id_change=on_update_id_change)
-        tg.on_message = lambda chat_id, text: on_message_cb(contact_name, chat_id, text)
-        tg.start_polling()
-        self._pollers[contact_name] = tg
+    def start(self, relay_url: str, my_pubkey_b64: str,
+              on_message_cb,
+              last_message_id: str = "",
+              on_last_id_change=None) -> RelayTransport:
+        self.stop()
+        t = RelayTransport(
+            relay_url=relay_url,
+            my_pubkey_b64=my_pubkey_b64,
+            last_message_id=last_message_id,
+            on_last_id_change=on_last_id_change,
+        )
+        t.on_message = on_message_cb
+        t.start_polling()
+        self._transport = t
+        return t
 
-    def stop(self, contact_name: str) -> None:
-        if contact_name in self._pollers:
-            self._pollers[contact_name].stop_polling()
-            del self._pollers[contact_name]
+    def stop(self) -> None:
+        if self._transport:
+            self._transport.stop_polling()
+            self._transport = None
 
-    def stop_all(self) -> None:
-        for name in list(self._pollers):
-            self.stop(name)
+    @property
+    def transport(self) -> RelayTransport | None:
+        return self._transport
 
-    def is_running(self, contact_name: str) -> bool:
-        p = self._pollers.get(contact_name)
-        return bool(p and p.is_polling)
+    @property
+    def is_running(self) -> bool:
+        return bool(self._transport and self._transport.is_polling)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -662,12 +604,12 @@ class HushboxApp(ctk.CTk):
         self._enc      = EncryptionManager(data_dir=DATA_DIR)
         self._store    = ChatStore(data_dir=DATA_DIR)
         self._settings = AppSettings(data_dir=DATA_DIR)
-        self._pollers  = TelegramPollerManager()
+        self._poller   = RelayPollerManager()
         self._tabs: dict[str, ChatTab] = {}
 
         self._build_layout()
         self._refresh_contacts()
-        self._start_my_poller()
+        self._start_relay_poller()
 
     # ── Layout ───────────────────────────────────────────────────
 
@@ -690,7 +632,7 @@ class HushboxApp(ctk.CTk):
                       fg_color="#555",
                       command=self._open_settings).pack(side="right", padx=2, pady=5)
 
-        # Status bar Telegram (dolny pasek)
+        # Status bar (dolny pasek)
         self._status_var = tk.StringVar(value="")
         status_bar = ctk.CTkLabel(self, textvariable=self._status_var,
                                    font=FONT_SMALL, text_color="#888",
@@ -727,16 +669,17 @@ class HushboxApp(ctk.CTk):
 
     # ── Kontakty ─────────────────────────────────────────────────
 
-    def _tg_status(self) -> dict[str, bool]:
+    def _relay_status(self) -> dict[str, bool]:
+        """Kontakt ma relay jeśli używa globalnego relay URL lub ma override."""
+        global_ok = bool(self._settings.relay_url)
         return {
-            name: bool(self._enc.get_contact(name).telegram_bot_token
-                       and self._enc.get_contact(name).telegram_chat_id)
+            name: global_ok or bool(self._enc.get_contact(name).relay_url)
             for name in self._enc.list_contacts()
         }
 
     def _refresh_contacts(self, active: str | None = None):
         contacts = self._enc.list_contacts()
-        self._sidebar.refresh(contacts, self._tg_status(),
+        self._sidebar.refresh(contacts, self._relay_status(),
                                active=active or self._current_contact())
 
     def _current_contact(self) -> str | None:
@@ -749,11 +692,10 @@ class HushboxApp(ctk.CTk):
         dlg = ContactDialog(self, title="Add contact")
         self.wait_window(dlg)
         if dlg.result:
-            name, key, tg_token, tg_chat = dlg.result
+            name, key, relay_url = dlg.result
             try:
-                self._enc.add_contact(name, key, tg_token, tg_chat)
+                self._enc.add_contact(name, key, relay_url=relay_url)
                 self._refresh_contacts()
-                self._restart_poller(name)
                 self._open_chat(name)
             except Exception as e:
                 messagebox.showerror("Error", str(e), parent=self)
@@ -762,11 +704,10 @@ class HushboxApp(ctk.CTk):
         c = self._enc.get_contact(name)
         dlg = ContactDialog(self, title="Edit contact",
                              name=name, key=c.public_key,
-                             tg_token=c.telegram_bot_token,
-                             tg_chat_id=c.telegram_chat_id)
+                             relay_url=c.relay_url)
         self.wait_window(dlg)
         if dlg.result:
-            new_name, new_key, tg_token, tg_chat = dlg.result
+            new_name, new_key, relay_url = dlg.result
             try:
                 if new_name != name:
                     self._enc.rename_contact(name, new_name)
@@ -774,14 +715,12 @@ class HushboxApp(ctk.CTk):
                     new_p = self._store._path(new_name)
                     if old_p.exists():
                         old_p.rename(new_p)
-                    self._pollers.stop(name)
                     self._close_tab(name)
                     name = new_name
-                self._enc.add_contact(name, new_key, tg_token, tg_chat)
+                self._enc.add_contact(name, new_key, relay_url=relay_url)
                 self._refresh_contacts()
-                self._restart_poller(name)
                 if name in self._tabs:
-                    self._tabs[name].refresh_tg_state()
+                    self._tabs[name].refresh_relay_state(self._poller.transport)
                 self._open_chat(name)
             except Exception as e:
                 messagebox.showerror("Error", str(e), parent=self)
@@ -795,7 +734,6 @@ class HushboxApp(ctk.CTk):
             return
         try:
             self._enc.remove_contact(name)
-            self._pollers.stop(name)
             self._close_tab(name)
             self._refresh_contacts()
         except Exception as e:
@@ -810,7 +748,8 @@ class HushboxApp(ctk.CTk):
         if name not in self._tabs:
             self._notebook.add(name)
             frame = self._notebook.tab(name)
-            tab = ChatTab(frame, name, self._enc, self._store, None)
+            tab = ChatTab(frame, name, self._enc, self._store,
+                          relay=self._poller.transport)
             tab.pack(fill="both", expand=True)
             self._tabs[name] = tab
 
@@ -829,59 +768,52 @@ class HushboxApp(ctk.CTk):
             self._notebook.pack_forget()
             self._welcome.pack(fill="both", expand=True)
 
-    # ── Telegram polling ─────────────────────────────────────────
+    # ── Relay polling ─────────────────────────────────────────────
 
-    def _start_my_poller(self):
-        """Uruchom polling na własnym bocie (odbiór wiadomości od kontaktów)."""
-        token = self._settings.my_bot_token
-        if token:
-            self._pollers.start(
-                "__self__", token, self._on_tg_message,
-                last_update_id=self._settings.last_update_id,
-                on_update_id_change=lambda uid: setattr(self._settings, "last_update_id", uid),
-            )
-            self._set_status("Telegram: receiving on your bot")
-        else:
-            self._set_status("Telegram: set your Bot Token in ⚙ Settings to enable auto-receive")
+    def _start_relay_poller(self):
+        url = self._settings.relay_url
+        if not url:
+            self._set_status("Relay: set Relay URL in ⚙ Settings to enable auto-receive")
+            return
 
-    def _restart_poller(self, name: str):
-        """Polling odbywa się tylko na własnym bocie — nie per kontakt."""
-        pass
+        transport = self._poller.start(
+            relay_url=url,
+            my_pubkey_b64=self._enc.export_public_key(),
+            on_message_cb=self._on_relay_message,
+            last_message_id=self._settings.last_message_id,
+            on_last_id_change=lambda mid: setattr(self._settings, "last_message_id", mid),
+        )
+        # zaktualizuj transport we wszystkich otwartych zakładkach
+        for tab in self._tabs.values():
+            tab.refresh_relay_state(transport)
+        self._set_status(f"Relay: connected to {url}")
 
     def _open_settings(self):
         SettingsWindow(self, self._settings, on_save_cb=self._on_settings_saved)
 
     def _on_settings_saved(self):
-        self._pollers.stop_all()
-        self._start_my_poller()
+        self._poller.stop()
+        self._start_relay_poller()
+        self._refresh_contacts()
 
-    def _on_tg_message(self, contact_name: str, chat_id: str, cipher_text: str):
-        """Callback z wątku pollingu — musi delegować do GUI przez after()."""
-        self.after(0, lambda: self._dispatch_tg_message(contact_name, chat_id, cipher_text))
+    def _on_relay_message(self, from_hash: str, payload: str):
+        """Callback z wątku pollingu — deleguj do GUI przez after()."""
+        self.after(0, lambda: self._dispatch_relay_message(from_hash, payload))
 
-    def _dispatch_tg_message(self, contact_name: str, chat_id: str, cipher_text: str):
-        # znajdź kontakt po chat_id nadawcy, ignorując contact_name z pollera
-        # (jeden bot może odbierać od wielu kontaktów)
-        resolved = self._resolve_contact_by_chat_id(chat_id) or contact_name
+    def _dispatch_relay_message(self, from_hash: str, payload: str):
+        resolved = self._enc.find_contact_by_pubkey_hash(from_hash)
+        if not resolved:
+            # nieznany nadawca — pokaż w pierwszej otwartej zakładce lub zignoruj
+            import logging
+            logging.getLogger(__name__).warning(
+                f"[Relay] unknown sender hash={from_hash[:8]}..."
+            )
+            return
+
         if resolved not in self._tabs:
             self._open_chat(resolved)
-        self._tabs[resolved].on_telegram_message(cipher_text)
-        self._set_status(f"New Telegram message from {resolved}")
-
-    def _resolve_contact_by_chat_id(self, chat_id: str) -> str | None:
-        """Znajdź nazwę kontaktu na podstawie jego telegram_chat_id."""
-        import logging
-        log = logging.getLogger(__name__)
-        for name in self._enc.list_contacts():
-            try:
-                stored = self._enc.get_contact(name).telegram_chat_id
-                log.debug(f"[TG] resolve: contact={name!r}, stored_chat_id={stored!r}, incoming={chat_id!r}, match={stored == chat_id}")
-                if stored == chat_id:
-                    return name
-            except Exception:
-                pass
-        log.warning(f"[TG] no contact found for chat_id={chat_id!r}")
-        return None
+        self._tabs[resolved].on_relay_message(payload)
+        self._set_status(f"New message from {resolved}")
 
     def _set_status(self, text: str):
         self._status_var.set(f"  {text}")
@@ -917,11 +849,10 @@ class HushboxApp(ctk.CTk):
         dlg = ContactDialog(self, title="Add contact from QR", key=public_key)
         self.wait_window(dlg)
         if dlg.result:
-            name, key, tg_token, tg_chat = dlg.result
+            name, key, relay_url = dlg.result
             try:
-                self._enc.add_contact(name, key, tg_token, tg_chat)
+                self._enc.add_contact(name, key, relay_url=relay_url)
                 self._refresh_contacts()
-                self._restart_poller(name)
                 self._open_chat(name)
             except Exception as e:
                 messagebox.showerror("Error", str(e), parent=self)
@@ -929,7 +860,7 @@ class HushboxApp(ctk.CTk):
     # ── Zamknięcie ───────────────────────────────────────────────
 
     def _on_close(self):
-        self._pollers.stop_all()
+        self._poller.stop()
         self.destroy()
 
 
