@@ -166,7 +166,7 @@ class ReceivePanel(ctk.CTkFrame):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x")
         ctk.CTkLabel(header, text="📥 Receive encrypted message", font=FONT_LABEL).pack(side="left", padx=6)
-        self._toggle_btn = ctk.CTkButton(header, text="▼ expand", width=90,
+        self._toggle_btn = ctk.CTkButton(header, text="▼▲ expand", width=90,
                                           fg_color="#444", command=self._toggle)
         self._toggle_btn.pack(side="right", padx=6)
 
@@ -188,10 +188,10 @@ class ReceivePanel(ctk.CTkFrame):
     def _toggle(self):
         if self._body_visible:
             self._body.pack_forget()
-            self._toggle_btn.configure(text="▼ expand")
+            self._toggle_btn.configure(text="▼▲ expand")
         else:
             self._body.pack(fill="x")
-            self._toggle_btn.configure(text="▲ collapse")
+            self._toggle_btn.configure(text="▲▼ collapse")
             self.cipher_entry.focus()
         self._body_visible = not self._body_visible
 
@@ -247,12 +247,12 @@ class ChatTab(ctk.CTkFrame):
         self.msg_entry.bind("<Return>", lambda _: self._send_clipboard())
 
         self._send_btn = ctk.CTkButton(
-            input_frame, text="Send 🔒", width=100, command=self._send_clipboard
+            input_frame, text="Encrypt 🔒", width=100, command=self._send_clipboard
         )
         self._send_btn.pack(side="left", padx=(0, 4))
 
         self._relay_btn = ctk.CTkButton(
-            input_frame, text="Send 📡", width=100,
+            input_frame, text="Send via relay 📡", width=100,
             fg_color=COLOR_RELAY, hover_color="#6c3483",
             command=self._send_relay,
         )
@@ -318,7 +318,7 @@ class ChatTab(ctk.CTkFrame):
 
         self.clipboard_clear()
         self.clipboard_append(cipher)
-        self._flash_btn(self._send_btn, "✓ Copied!", "#1a6b3c", "Send 🔒")
+        self._flash_btn(self._send_btn, "✓ Copied!", "#1a6b3c", "Encrypt 🔒")
 
     # ── Wysyłanie — relay ───────────────────────────────────────
 
@@ -359,12 +359,12 @@ class ChatTab(ctk.CTkFrame):
 
         threading.Thread(target=_do_send, daemon=True).start()
         self.msg_entry.delete(0, "end")
-        self._flash_btn(self._relay_btn, "⏳ Sending...", "#555", "Send 📡",
+        self._flash_btn(self._relay_btn, "⏳ Sending...", "#555", "Send via relay 📡",
                         restore_color=COLOR_RELAY)
 
     def _on_relay_sent(self, msg: Message):
         self._render_message(msg)
-        self._flash_btn(self._relay_btn, "✓ Sent!", "#1a6b3c", "Send 📡",
+        self._flash_btn(self._relay_btn, "✓ Sent!", "#1a6b3c", "Send via relay 📡",
                         restore_color=COLOR_RELAY)
 
     # ── Odbieranie (deszyfrowanie) ───────────────────────────────
