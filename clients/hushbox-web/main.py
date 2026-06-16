@@ -166,6 +166,7 @@ class ReceivePanel(ctk.CTkFrame):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x")
         ctk.CTkLabel(header, text="📥 Receive encrypted message", font=FONT_LABEL).pack(side="left", padx=6)
+
         self._toggle_btn = ctk.CTkButton(header, text="▼▲ expand", width=90,
                                           fg_color="#444", command=self._toggle)
         self._toggle_btn.pack(side="right", padx=6)
@@ -188,6 +189,7 @@ class ReceivePanel(ctk.CTkFrame):
     def _toggle(self):
         if self._body_visible:
             self._body.pack_forget()
+
             self._toggle_btn.configure(text="▼▲ expand")
         else:
             self._body.pack(fill="x")
