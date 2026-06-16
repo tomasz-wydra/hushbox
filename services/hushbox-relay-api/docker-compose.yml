@@ -5,7 +5,7 @@ services:
     container_name: hushbox-relay
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "5001:5000"
     environment:
       - MONGO_URI=mongodb://mongo:27017/hushbox
       - MESSAGE_TTL=86400        # 24h
