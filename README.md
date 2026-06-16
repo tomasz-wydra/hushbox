@@ -20,7 +20,7 @@ Messages are encrypted locally on the sender’s device and can only be decrypte
 ## Quick Start
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/tomasz-wydra/hushbox.git
 pip install -r requirements.txt
 cd relay_server
 docker compose up -d

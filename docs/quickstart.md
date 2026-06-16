@@ -19,6 +19,7 @@ By default, the relay listens on port `5000`.
 ## 2. Install Client Dependencies
 
 ```bash
+cd ..
 pip install -r requirements.txt
 ```
 
@@ -33,7 +34,7 @@ python main.py
 Open **Settings** and set your relay URL, for example:
 
 ```text
-https://relay.example.com
+https://relay.bevirtual.cloud
 ```
 
 ## 5. Exchange Public Keys
