@@ -1,6 +1,6 @@
 # Hushbox 🔐
 
-End-to-end encrypted messaging — monorepo.
+End-to-end encrypted messaging using NaCl/Curve25519. No server, no accounts — just keys.
 
 ## Structure
 
