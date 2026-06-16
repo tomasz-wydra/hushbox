@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from hushbox_relay_api import server
+import hushbox_relay_api.server as server
 
 import pytest
 import mongomock
@@ -20,7 +22,6 @@ import mongomock
 @pytest.fixture(autouse=True)
 def mock_mongo(monkeypatch):
     """Podmień get_collection() na mongomock kolekcję."""
-    import server
     client = mongomock.MongoClient()
     db     = client["hushbox"]
     col    = db["messages"]
@@ -39,7 +40,6 @@ def mock_mongo(monkeypatch):
 
 @pytest.fixture
 def client():
-    import server
     server.app.config["TESTING"] = True
     with server.app.test_client() as c:
         yield c
@@ -55,7 +55,7 @@ VALID_HASH_B = "b" * 64
 class TestHealth:
 
     def test_health_ok(self, client, mock_mongo):
-        with patch("server.get_collection") as mock_gc:
+        with patch("hushbox_relay_api.server.get_collection") as mock_gc:
             col = MagicMock()
             col.database.client.admin.command.return_value = {"ok": 1}
             mock_gc.return_value = col
@@ -116,8 +116,7 @@ class TestSendMessage:
 
     def test_send_queue_full(self, client, mock_mongo):
         """Gdy kolejka pełna — 429."""
-        import server
-        with patch("server.MAX_QUEUE", 2):
+        with patch("hushbox_relay_api.server.MAX_QUEUE", 2):
             for _ in range(2):
                 mock_mongo.insert_one({
                     "msg_id":         str(uuid.uuid4()),

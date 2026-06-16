@@ -23,10 +23,8 @@ from tkinter import messagebox
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
-from encryption_manager import EncryptionManager
-from chat_store import ChatStore, Message
-from relay_transport import RelayTransport, pubkey_to_hash
-from app_settings import AppSettings
+from hushbox_core import EncryptionManager, ChatStore, Message, RelayTransport, pubkey_to_hash, AppSettings
+from hushbox_core.encryption_manager import ContactInfo
 
 
 # ─────────────────────────────────────────────────────────────────

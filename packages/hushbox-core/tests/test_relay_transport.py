@@ -9,11 +9,7 @@ import threading
 import unittest
 from unittest.mock import MagicMock, patch, call
 
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from relay_transport import RelayTransport, pubkey_to_hash
+from hushbox_core import RelayTransport, pubkey_to_hash
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -62,7 +58,7 @@ class TestPubkeyToHash(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────
 class TestRelayTransportSend(unittest.TestCase):
 
-    @patch("relay_transport.httpx.Client")
+    @patch("hushbox_core.relay_transport.httpx.Client")
     def test_send_posts_correct_fields(self, MockClient):
         ctx = MockClient.return_value.__enter__.return_value
         ctx.post.return_value = _mock_response({"ok": True, "id": "abc123"})
@@ -78,7 +74,7 @@ class TestRelayTransportSend(unittest.TestCase):
         self.assertEqual(body["payload"], "encrypted_blob")
         self.assertEqual(body["to"], pubkey_to_hash(FAKE_PUBKEY2))
 
-    @patch("relay_transport.httpx.Client")
+    @patch("hushbox_core.relay_transport.httpx.Client")
     def test_send_includes_from_when_provided(self, MockClient):
         ctx = MockClient.return_value.__enter__.return_value
         ctx.post.return_value = _mock_response({"ok": True, "id": "xyz"})
@@ -90,19 +86,19 @@ class TestRelayTransportSend(unittest.TestCase):
         body = kwargs.get("json") or ctx.post.call_args[0][1]
         self.assertIn("from", body)
 
-    @patch("relay_transport.httpx.Client")
+    @patch("hushbox_core.relay_transport.httpx.Client")
     def test_send_raises_on_empty_recipient(self, MockClient):
         t = _make_transport()
         with self.assertRaises(ValueError):
             t.send("", "payload")
 
-    @patch("relay_transport.httpx.Client")
+    @patch("hushbox_core.relay_transport.httpx.Client")
     def test_send_raises_on_empty_payload(self, MockClient):
         t = _make_transport()
         with self.assertRaises(ValueError):
             t.send(FAKE_PUBKEY2, "")
 
-    @patch("relay_transport.httpx.Client")
+    @patch("hushbox_core.relay_transport.httpx.Client")
     def test_send_raises_on_server_error(self, MockClient):
         ctx = MockClient.return_value.__enter__.return_value
         ctx.post.return_value = _mock_response({"ok": False, "error": "fail"})
@@ -117,7 +113,7 @@ class TestRelayTransportSend(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────
 class TestRelayPolling(unittest.TestCase):
 
-    @patch("relay_transport.httpx.Client")
+    @patch("hushbox_core.relay_transport.httpx.Client")
     def test_start_polling_creates_thread(self, MockClient):
         ctx = MockClient.return_value.__enter__.return_value
         ctx.get.return_value = _mock_response({"ok": True, "messages": []})
@@ -128,7 +124,7 @@ class TestRelayPolling(unittest.TestCase):
         self.assertTrue(t.is_polling)
         t.stop_polling()
 
-    @patch("relay_transport.httpx.Client")
+    @patch("hushbox_core.relay_transport.httpx.Client")
     def test_start_polling_idempotent(self, MockClient):
         ctx = MockClient.return_value.__enter__.return_value
         ctx.get.return_value = _mock_response({"ok": True, "messages": []})
@@ -141,7 +137,7 @@ class TestRelayPolling(unittest.TestCase):
         t.stop_polling()
 
     def test_stop_polling_clears_is_polling(self):
-        with patch("relay_transport.httpx.Client") as MockClient:
+        with patch("hushbox_core.relay_transport.httpx.Client") as MockClient:
             ctx = MockClient.return_value.__enter__.return_value
             ctx.get.return_value = _mock_response({"ok": True, "messages": []})
 
@@ -154,7 +150,7 @@ class TestRelayPolling(unittest.TestCase):
                 t._polling_thread.join(timeout=2)
             self.assertFalse(t.is_polling)
 
-    @patch("relay_transport.httpx.Client")
+    @patch("hushbox_core.relay_transport.httpx.Client")
     def test_not_polling_initially(self, MockClient):
         t = _make_transport()
         self.assertFalse(t.is_polling)
@@ -165,7 +161,7 @@ class TestRelayPolling(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────
 class TestRelayOnMessage(unittest.TestCase):
 
-    @patch("relay_transport.httpx.Client")
+    @patch("hushbox_core.relay_transport.httpx.Client")
     def test_on_message_called_for_each_message(self, MockClient):
         messages = [
             {"id": "id1", "from": "hash_a", "payload": "enc1"},
@@ -200,7 +196,7 @@ class TestRelayOnMessage(unittest.TestCase):
         self.assertEqual(received[0], ("hash_a", "enc1"))
         self.assertEqual(received[1], ("hash_b", "enc2"))
 
-    @patch("relay_transport.httpx.Client")
+    @patch("hushbox_core.relay_transport.httpx.Client")
     def test_last_message_id_updated(self, MockClient):
         messages = [{"id": "msg-999", "from": "h", "payload": "p"}]
 
@@ -227,7 +223,7 @@ class TestRelayOnMessage(unittest.TestCase):
 
         self.assertIn("msg-999", ids)
 
-    @patch("relay_transport.httpx.Client")
+    @patch("hushbox_core.relay_transport.httpx.Client")
     def test_no_callback_no_crash(self, MockClient):
         """Brak on_message — wiadomości są ignorowane bez wyjątku."""
         ctx = MockClient.return_value.__enter__.return_value

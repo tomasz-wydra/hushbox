@@ -1,67 +1,103 @@
 # Hushbox 🔐
 
-Hushbox is a desktop app for end-to-end encrypted messaging built with NaCl/libsodium public-key cryptography.
+End-to-end encrypted messaging — monorepo.
 
-Messages are encrypted locally on the sender’s device and can only be decrypted by the intended recipient. Hushbox supports both manual ciphertext exchange and an optional relay layer based on Flask and MongoDB for temporary encrypted message delivery.
+## Structure
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/Tests-55%20passed-brightgreen)
+```
+hushbox/
+├── packages/
+│   └── hushbox-core/          # E2E crypto core — MIT
+│       ├── hushbox_core/
+│       │   ├── encryption_manager.py   # NaCl keypairs, encrypt/decrypt
+│       │   ├── chat_store.py           # Message history (JSON)
+│       │   ├── relay_transport.py      # HTTP relay client (long polling)
+│       │   └── app_settings.py         # Persistent settings
+│       └── tests/
+│
+├── services/
+│   └── hushbox-relay-api/     # Store-and-forward relay server — MIT
+│       ├── hushbox_relay_api/
+│       │   └── server.py               # Flask + MongoDB
+│       ├── Dockerfile
+│       └── docker-compose.yml
+│
+└── clients/
+    ├── hushbox-web/           # Desktop GUI (customtkinter) — MIT
+    │   └── main.py
+    └── hushbox-mobile/        # Mobile client — planned
+        ├── README.md
+        └── ROADMAP.md
+```
 
-## Features
+## Architecture
 
-- End-to-end encrypted messaging using NaCl/libsodium.
-- Local key generation and local decryption.
-- Manual/offline ciphertext exchange through any transport channel.
-- Optional relay server for temporary encrypted message delivery.
-- No accounts, phone numbers, or password-based onboarding.
-- Configurable message retention, with 24 hours by default.
+```
+┌─────────────────┐     ┌─────────────────┐
+│  hushbox-web    │     │  hushbox-mobile  │
+│  (customtkinter)│     │  (Kivy / native) │
+└────────┬────────┘     └────────┬─────────┘
+         │                       │
+         └───────────┬───────────┘
+                     │  uses
+              ┌──────▼──────┐
+              │ hushbox-core │   MIT — public API, auditable
+              │  (Python pkg)│
+              └──────┬───────┘
+                     │  HTTP (long polling)
+              ┌──────▼───────────────┐
+              │  hushbox-relay-api   │   your own Docker
+              │  Flask + MongoDB     │
+              └──────────────────────┘
+```
 
 ## Quick Start
 
+### 1. Start relay server
+
 ```bash
-git clone https://github.com/tomasz-wydra/hushbox.git
-pip install -r requirements.txt
-cd relay_server
+cd services/hushbox-relay-api
 docker compose up -d
-cd ..
+```
+
+### 2. Run desktop client
+
+```bash
+cd clients/hushbox-web
+pip install -r requirements.txt
 python main.py
 ```
 
-For a full setup guide, see [docs/quickstart.md](./docs/quickstart.md).
+Then: **⚙ Settings** → enter relay URL → Save.
 
-## Documentation
+## Packages
 
-- [Docs index](./docs/README.md)
-- [Architecture](./docs/architecture.md)
-- [Quick start](./docs/quickstart.md)
-- [Relay API](./docs/relay-api.md)
-- [Relay deployment](./docs/relay-deployment.md)
-- [Configuration](./docs/configuration.md)
-- [Security model](./docs/security-model.md)
-- [Migration from Telegram](./docs/migration-from-telegram.md)
+| Package | Description | License |
+|---------|-------------|---------|
+| `hushbox-core` | Crypto, storage, transport | MIT |
+| `hushbox-relay-api` | Relay server | MIT |
+| `hushbox-web` | Desktop client | MIT |
+| `hushbox-mobile` | Mobile client (planned) | TBD |
 
-## Project Structure
+## Security Model
 
-```text
-hushbox/
-├── /         # Desktop client
-├── relay_server/    # Flask-based relay layer
-└── docs/            # Project documentation
+- **NaCl Box** (X25519 + XSalsa20-Poly1305) — authenticated E2E encryption
+- Private key never leaves the device (`my_private_key.bin` / Keychain)
+- Relay server sees only: SHA-256 key hashes + encrypted blobs
+- No accounts, no phone numbers, no telemetry
+
+## Development
+
+```bash
+# Install core in editable mode
+pip install -e packages/hushbox-core
+
+# Run all tests
+pytest packages/hushbox-core/tests/ -v
+pytest services/hushbox-relay-api/tests/ -v
 ```
-
-## Security
-
-Hushbox protects message content with end-to-end encryption, but secure deployment still depends on your relay setup, TLS configuration, key verification process, and endpoint security.
-
-See [SECURITY.md](./SECURITY.md) and [docs/security-model.md](./docs/security-model.md).
-
-## Contributing
-
-Contributions, bug reports, and documentation improvements are welcome.
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](./LICENSE).
+All packages in this repository are licensed under the **MIT License** unless noted otherwise.
+See individual `LICENSE` files in each package/service directory.

@@ -11,11 +11,7 @@ from pathlib import Path
 from nacl.public import PrivateKey
 from nacl.encoding import Base64Encoder
 
-# ── doimport modułu z katalogu nadrzędnego ─────────────────────
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from encryption_manager import EncryptionManager
+from hushbox_core import EncryptionManager, ContactInfo
 
 
 # ─────────────────────────────────────────────────────────────────
