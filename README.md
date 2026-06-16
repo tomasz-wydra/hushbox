@@ -1,13 +1,19 @@
 # Hushbox 🔐
 
-End-to-end encrypted messaging using NaCl/Curve25519. No server, no accounts — just keys.
+End-to-end encrypted messaging using NaCl/Curve25519. No accounts — just keys. Relay is blind to content.
+
+## Screenshots
+
+![Hushbox desktop UI](docs/images/hushbox-ui.png)
+
+![Hushbox edit contact UI](docs/images/hushbox-edit-contact.png)
 
 ## Structure
 
 ```
 hushbox/
 ├── packages/
-│   └── hushbox-core/          # E2E crypto core — MIT
+│   └── hushbox-core/                   # E2E crypto core — MIT
 │       ├── hushbox_core/
 │       │   ├── encryption_manager.py   # NaCl keypairs, encrypt/decrypt
 │       │   ├── chat_store.py           # Message history (JSON)
@@ -16,18 +22,22 @@ hushbox/
 │       └── tests/
 │
 ├── services/
-│   └── hushbox-relay-api/     # Store-and-forward relay server — MIT
+│   └── hushbox-relay-api/              # Store-and-forward relay server — MIT
 │       ├── hushbox_relay_api/
 │       │   └── server.py               # Flask + MongoDB
 │       ├── Dockerfile
 │       └── docker-compose.yml
 │
-└── clients/
-    ├── hushbox-web/           # Desktop GUI (customtkinter) — MIT
-    │   └── main.py
-    └── hushbox-mobile/        # Mobile client — planned
-        ├── README.md
-        └── ROADMAP.md
+├── clients/
+│     ├── hushbox-web/                  # Desktop GUI (customtkinter) — MIT
+│     │   └── main.py
+│     └── hushbox-mobile/               # Mobile client — planned
+│         ├── README.md
+│         └── ROADMAP.md
+│         
+└── docs/
+    └── images/                         # UI screenshots
+
 ```
 
 ## Architecture
@@ -68,7 +78,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Then: **⚙ Settings** → enter relay URL → Save.
+Then: **⚙ Settings** → enter relay URL (e.g. `https://relay.domain.com:5001`) → Save.
 
 ## Packages
 
@@ -77,7 +87,7 @@ Then: **⚙ Settings** → enter relay URL → Save.
 | `hushbox-core` | Crypto, storage, transport | MIT |
 | `hushbox-relay-api` | Relay server | MIT |
 | `hushbox-web` | Desktop client | MIT |
-| `hushbox-mobile` | Mobile client (planned) | TBD |
+| `hushbox-mobile` | Mobile client (planned; design-only for now) | TBD |
 
 ## Security Model
 
