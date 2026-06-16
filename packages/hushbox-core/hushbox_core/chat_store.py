@@ -13,6 +13,7 @@ class Message:
     plaintext: str
     ciphertext: str
     timestamp: str = field(default_factory=lambda: datetime.now().strftime("%H:%M:%S"))
+    via_telegram: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -20,11 +21,18 @@ class Message:
             "plaintext": self.plaintext,
             "ciphertext": self.ciphertext,
             "timestamp": self.timestamp,
+            "via_telegram": self.via_telegram,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "Message":
-        return cls(**d)
+        return cls(
+            direction=d["direction"],
+            plaintext=d["plaintext"],
+            ciphertext=d["ciphertext"],
+            timestamp=d.get("timestamp", ""),
+            via_telegram=d.get("via_telegram", False),
+        )
 
 
 class ChatStore:

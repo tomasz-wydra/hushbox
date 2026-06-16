@@ -1,6 +1,0 @@
-pynacl
-customtkinter
-segno
-Pillow
-pytest
-pytest-mock

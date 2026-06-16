@@ -3,11 +3,8 @@ Testy jednostkowe dla ChatStore.
 """
 import pytest
 from pathlib import Path
-import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from chat_store import ChatStore, Message
+from hushbox_core import ChatStore, Message
 
 
 @pytest.fixture

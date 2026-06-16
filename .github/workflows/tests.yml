@@ -1,12 +1,31 @@
 name: Tests
+
 on: [push, pull_request]
+
 jobs:
-  test:
+
+  core:
+    name: hushbox-core
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
-      - run: pytest tests/ -v
+      - name: Install
+        run: pip install -e "packages/hushbox-core[dev]"
+      - name: Test
+        run: pytest packages/hushbox-core/tests/ -v
+
+  relay-api:
+    name: hushbox-relay-api
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -r services/hushbox-relay-api/requirements.txt mongomock pytest
+      - name: Test
+        run: pytest services/hushbox-relay-api/tests/ -v

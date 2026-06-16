@@ -10,7 +10,9 @@ __pycache__/
 chat_history/
 my_private_key.bin
 my_public_key_qr.*
-contact_keys.*
+contact_keys.json
+settings.json
+*.db
 
 # Distribution / packaging
 .Python

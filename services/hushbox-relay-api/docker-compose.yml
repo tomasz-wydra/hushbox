@@ -1,0 +1,49 @@
+services:
+
+  relay:
+    build: .
+    container_name: hushbox-relay
+    restart: unless-stopped
+    ports:
+      - "5001:5000"
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/hushbox
+      - MESSAGE_TTL=86400        # 24h
+      - MAX_QUEUE=500
+      - LONG_POLL_TIMEOUT=30
+      - MAX_PAYLOAD=65536
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  mongo:
+    image: mongo:7
+    container_name: hushbox-mongo
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    # nie eksponuj portu na zewnątrz — tylko relay ma dostęp
+    expose:
+      - "27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Opcjonalnie — mongo-express (web UI dla bazy, tylko na localhoście)
+  # mongo-express:
+  #   image: mongo-express
+  #   container_name: hushbox-mongoexpress
+  #   restart: unless-stopped
+  #   ports:
+  #     - "127.0.0.1:8081:8081"
+  #   environment:
+  #     - ME_CONFIG_MONGODB_URL=mongodb://mongo:27017/
+  #   depends_on:
+  #     - mongo
+
+volumes:
+  mongo_data:
+    driver: local
