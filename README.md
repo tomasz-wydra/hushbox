@@ -2,9 +2,7 @@
 
 End-to-end encrypted messaging using NaCl/Curve25519. No accounts — just keys. Relay is blind to content.
 
-## Screenshots
-
-![Hushbox desktop UI](docs/images/hushbox-ui.png)
+## Screenshot
 
 ![Hushbox edit contact UI](docs/images/hushbox-edit-contact.png)
 
