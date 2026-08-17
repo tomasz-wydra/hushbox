@@ -249,3 +249,170 @@ class TestStats:
         data = client.get("/stats").get_json()
         assert data["total_pending_messages"] == 3
         assert data["recipients_with_messages"] == 2
+
+
+# ─────────────────────────────────────────────────────────────────
+# Hardening: liveness, walidacja wejścia, limity, rejestr long-poll
+# ─────────────────────────────────────────────────────────────────
+
+class TestLivenessEndpoint:
+
+    def test_healthz_returns_ok(self, client):
+        r = client.get("/healthz")
+        assert r.status_code == 200
+        assert r.get_json()["status"] == "ok"
+
+    def test_healthz_does_not_touch_mongo(self, client, monkeypatch):
+        """Liveness musi działać nawet gdy baza jest niedostępna."""
+        def _boom():
+            raise RuntimeError("mongo down")
+        monkeypatch.setattr(server, "get_collection", _boom)
+        assert client.get("/healthz").status_code == 200
+
+    def test_healthz_exposes_only_status_and_ts(self, client):
+        assert set(client.get("/healthz").get_json()) == {"status", "ts"}
+
+    def test_healthz_rejects_post(self, client):
+        assert client.post("/healthz").status_code == 405
+
+    def test_health_reports_degraded_when_mongo_down(self, client, monkeypatch):
+        """W przeciwieństwie do /healthz, /health sygnalizuje brak bazy."""
+        def _boom():
+            raise RuntimeError("mongo down")
+        monkeypatch.setattr(server, "get_collection", _boom)
+        r = client.get("/health")
+        assert r.status_code == 503
+        assert r.get_json()["mongo"] is False
+
+
+class TestQueryParamValidation:
+
+    def test_non_numeric_timeout_returns_400_not_500(self, client):
+        r = client.get(f"/messages/{VALID_HASH_A}?timeout=abc")
+        assert r.status_code == 400
+        assert r.get_json()["ok"] is False
+
+    def test_non_numeric_limit_returns_400(self, client):
+        assert client.get(f"/messages/{VALID_HASH_A}?limit=x").status_code == 400
+
+    def test_negative_timeout_returns_400(self, client):
+        assert client.get(f"/messages/{VALID_HASH_A}?timeout=-5").status_code == 400
+
+    def test_empty_param_falls_back_to_default(self, client):
+        assert client.get(f"/messages/{VALID_HASH_A}?timeout=&limit=").status_code == 200
+
+    def test_limit_is_capped(self, client, mock_mongo):
+        for _ in range(5):
+            client.post("/messages", json={"to": VALID_HASH_A, "payload": "eA=="})
+        r = client.get(f"/messages/{VALID_HASH_A}?limit=99999")
+        assert r.status_code == 200
+        assert len(r.get_json()["messages"]) <= 200
+
+    def test_errors_are_json_not_html(self, client):
+        r = client.get(f"/messages/{VALID_HASH_A}?timeout=abc")
+        assert r.is_json
+        assert "error" in r.get_json()
+
+
+class TestBodySizeLimit:
+
+    def test_max_content_length_is_configured(self):
+        """Bez tego limitu Flask parsuje dowolnie duże ciało do pamięci."""
+        assert server.app.config["MAX_CONTENT_LENGTH"] is not None
+        assert server.app.config["MAX_CONTENT_LENGTH"] >= server.MAX_PAYLOAD
+
+    def test_oversized_body_is_rejected(self, client):
+        huge = "A" * (server.app.config["MAX_CONTENT_LENGTH"] + 1024)
+        r = client.post("/messages", json={"to": VALID_HASH_A, "payload": huge})
+        assert r.status_code == 413
+
+    def test_payload_over_max_payload_rejected(self, client):
+        payload = "A" * (server.MAX_PAYLOAD + 1)
+        r = client.post("/messages", json={"to": VALID_HASH_A, "payload": payload})
+        assert r.status_code == 413
+
+
+class TestWaiterRegistry:
+
+    def test_event_removed_when_last_waiter_leaves(self):
+        reg = server.WaiterRegistry()
+        reg.acquire("abc")
+        assert reg.waiting_inboxes() == 1
+        reg.release("abc")
+        assert reg.waiting_inboxes() == 0, "wyciek pamięci — zdarzenie nie zwolnione"
+
+    def test_refcounting_keeps_event_for_second_waiter(self):
+        reg = server.WaiterRegistry()
+        e1 = reg.acquire("abc")
+        e2 = reg.acquire("abc")
+        assert e1 is e2
+        reg.release("abc")
+        assert reg.waiting_inboxes() == 1
+        reg.release("abc")
+        assert reg.waiting_inboxes() == 0
+
+    def test_registry_is_bounded(self):
+        reg = server.WaiterRegistry(max_waiters=2)
+        assert reg.acquire("a") is not None
+        assert reg.acquire("b") is not None
+        assert reg.acquire("c") is None, "rejestr musi odmówić po przekroczeniu limitu"
+
+    def test_release_unknown_key_is_noop(self):
+        reg = server.WaiterRegistry()
+        reg.release("nieistnieje")   # nie może rzucić
+        assert reg.waiting_inboxes() == 0
+
+    def test_notify_unknown_key_is_noop(self):
+        reg = server.WaiterRegistry()
+        reg.notify("nieistnieje")
+
+    def test_polling_does_not_leak_events(self, client, mock_mongo):
+        """Zapytania o losowe skrzynki nie mogą zostawiać wpisów w pamięci."""
+        before = server._waiters.waiting_inboxes()
+        for i in range(20):
+            h = f"{i:064x}"
+            client.get(f"/messages/{h}")
+        assert server._waiters.waiting_inboxes() == before
+
+    def test_notify_wakes_waiter(self):
+        import threading
+        reg = server.WaiterRegistry()
+        event = reg.acquire("inbox")
+        woken = threading.Event()
+
+        def _wait():
+            if event.wait(timeout=5):
+                woken.set()
+
+        t = threading.Thread(target=_wait)
+        t.start()
+        time.sleep(0.1)
+        reg.notify("inbox")
+        t.join(timeout=5)
+        assert woken.is_set()
+        reg.release("inbox")
+
+
+class TestStatsToken:
+
+    def test_stats_open_when_token_not_configured(self, client, monkeypatch):
+        monkeypatch.setattr(server, "STATS_TOKEN", "")
+        assert client.get("/stats").status_code == 200
+
+    def test_stats_requires_token_when_configured(self, client, monkeypatch):
+        monkeypatch.setattr(server, "STATS_TOKEN", "sekret")
+        assert client.get("/stats").status_code == 403
+
+    def test_stats_accepts_correct_token(self, client, monkeypatch):
+        monkeypatch.setattr(server, "STATS_TOKEN", "sekret")
+        r = client.get("/stats", headers={"X-Stats-Token": "sekret"})
+        assert r.status_code == 200
+
+    def test_stats_rejects_wrong_token(self, client, monkeypatch):
+        monkeypatch.setattr(server, "STATS_TOKEN", "sekret")
+        r = client.get("/stats", headers={"X-Stats-Token": "zly"})
+        assert r.status_code == 403
+
+    def test_stats_reports_waiting_inboxes(self, client, monkeypatch):
+        monkeypatch.setattr(server, "STATS_TOKEN", "")
+        assert "waiting_inboxes" in client.get("/stats").get_json()

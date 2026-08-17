@@ -28,6 +28,23 @@ Returns server and MongoDB health status.
 
 ---
 
+### `GET /healthz`
+
+Liveness only: answers `200 OK` as long as the process can serve requests. It
+does **not** touch MongoDB, which is deliberate — this is the endpoint used by
+the container healthcheck, and probing the database from a publicly reachable
+path would turn every health probe into a free database round trip.
+
+```json
+{ "status": "ok", "ts": 1700000000.0 }
+```
+
+Use `/health` (above) for readiness, when you need to know whether MongoDB is
+reachable. A green `/healthz` with a degraded `/health` means the process is
+alive but cannot store or return messages.
+
+---
+
 ### `POST /messages`
 
 Send an encrypted message to a recipient.
@@ -90,7 +107,7 @@ Retrieve pending messages for a recipient. Supports long polling.
 **Error responses:**
 | Code | Reason |
 |------|--------|
-| `400` | Invalid `recipient_hash` |
+| `400` | Invalid `recipient_hash`, or a non-numeric / negative query parameter |
 
 ---
 
@@ -110,7 +127,7 @@ Acknowledge (delete) a message after successful delivery.
 **Error responses:**
 | Code | Reason |
 |------|--------|
-| `400` | Invalid `recipient_hash` |
+| `400` | Invalid `recipient_hash`, or a non-numeric / negative query parameter |
 | `404` | Message not found or does not belong to this recipient |
 
 ---
@@ -119,11 +136,17 @@ Acknowledge (delete) a message after successful delivery.
 
 Returns queue statistics.
 
+**Authentication:** when `STATS_TOKEN` is set, the request must carry a matching
+`X-Stats-Token` header (compared in constant time) or it is rejected with `401`.
+Leaving the variable unset keeps the endpoint open for backward compatibility,
+but traffic metadata is worth protecting — set a token on any public relay.
+
 **Response `200 OK`:**
 ```json
 {
   "recipients_with_messages": 42,
   "total_pending_messages":   157,
+  "waiting_inboxes":          3,
   "message_ttl_seconds":      86400
 }
 ```
@@ -153,6 +176,9 @@ The relay waits for MongoDB to pass a health check before starting.
 | `MAX_QUEUE`         | `500`                             | Maximum pending messages per recipient |
 | `LONG_POLL_TIMEOUT` | `30`                              | Maximum long-poll wait in seconds |
 | `MAX_PAYLOAD`       | `65536`                           | Maximum payload size in bytes |
+| `MAX_BODY_BYTES`    | `MAX_PAYLOAD + 8192`              | Hard request-body limit enforced by Flask *before* the JSON body is parsed into memory |
+| `MAX_WAITERS`       | `10000`                           | Maximum number of inboxes waiting in a long poll at once; beyond it long polling degrades to plain polling instead of growing unbounded |
+| `STATS_TOKEN`       | *(empty)*                         | When set, `/stats` requires a matching `X-Stats-Token` header |
 | `PORT`              | `5000`                            | Port for direct `python -m` runs (not used by gunicorn) |
 
 ---
@@ -167,8 +193,15 @@ MONGO_URI=mongodb://localhost:27017/hushbox python -m hushbox_relay_api.server
 Or with gunicorn:
 
 ```bash
-gunicorn --workers=4 --threads=8 --timeout=60 --bind=0.0.0.0:5000 hushbox_relay_api.server:app
+gunicorn --workers=1 --threads=32 --timeout=60 --bind=0.0.0.0:5000 hushbox_relay_api.server:app
 ```
+
+> **One worker on purpose.** Long polling is coordinated through in-process
+> `threading.Event` objects, which are not shared between worker processes. With
+> several workers, a message stored by one worker does not wake a client parked
+> in another, so delivery silently falls back to waiting out the full
+> `LONG_POLL_TIMEOUT`. Scale with threads (I/O-bound work), or move the wakeup
+> signal to a shared channel before scaling out processes.
 
 ---
 
