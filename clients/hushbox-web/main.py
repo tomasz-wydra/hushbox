@@ -19,11 +19,23 @@ Układ:
 import json
 import threading
 import tkinter as tk
-from tkinter import messagebox
+from pathlib import Path
+from tkinter import messagebox, simpledialog
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
-from hushbox_core import EncryptionManager, ChatStore, Message, RelayTransport, pubkey_to_hash, AppSettings
+from hushbox_core import (
+    AppSettings,
+    ChatStore,
+    EncryptionManager,
+    InvalidPassphrase,
+    KeyConflictError,
+    Message,
+    RelayTransport,
+    fingerprint_for_pubkey,
+    keyfile,
+    pubkey_to_hash,
+)
 from hushbox_core.encryption_manager import ContactInfo
 
 
@@ -41,6 +53,35 @@ COLOR_CIPHER = "#555555"
 COLOR_RELAY  = "#8e44ad"   # akcent dla relay
 
 DATA_DIR = "."
+PRIVATE_KEY_FILENAME = "my_private_key.bin"
+
+
+def unlock_private_key(data_dir: str = DATA_DIR) -> str | None | bool:
+    """Zapytaj o hasło, jeśli plik klucza prywatnego jest zaszyfrowany.
+
+    Zwraca hasło, ``None`` gdy plik nie wymaga hasła (nowa instalacja albo
+    format legacy), albo ``False`` gdy użytkownik zrezygnował — wtedy nie ma
+    tożsamości, z którą można wystartować.
+
+    Walidacja idzie wprost na plik klucza, a nie przez konstruowanie
+    ``EncryptionManager``, więc nieudana próba nie ma skutków ubocznych.
+    """
+    key_path = Path(data_dir) / PRIVATE_KEY_FILENAME
+    if not keyfile.path_is_encrypted(key_path):
+        return None
+
+    data = key_path.read_bytes()
+    prompt = "Enter the password protecting your private key:"
+    while True:
+        passphrase = simpledialog.askstring("Unlock Hushbox", prompt, show="*")
+        if not passphrase:
+            return False
+        try:
+            keyfile.unseal(data, passphrase)
+        except InvalidPassphrase:
+            prompt = "Wrong password. Try again:"
+            continue
+        return passphrase
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -141,6 +182,14 @@ class QRWindow(ctk.CTkToplevel):
             key_box.insert("1.0", public_key_b64)
             key_box.configure(state="disabled")
             key_box.pack(pady=10, padx=20)
+
+            # Fingerprint to wartość, którą rozmówca odczytuje przez telefon,
+            # żeby potwierdzić, że dodał właściwy klucz. Liczony z klucza
+            # pokazanego powyżej, więc nie trzeba go przekazywać osobno.
+            ctk.CTkLabel(self, text="Fingerprint (read this out to verify):",
+                         font=FONT_SMALL).pack(pady=(8, 0))
+            ctk.CTkLabel(self, text=fingerprint_for_pubkey(public_key_b64),
+                         font=FONT_MONO, wraplength=470).pack(pady=(0, 6))
 
             ctk.CTkButton(self, text="Copy key",
                           command=lambda: self._copy(public_key_b64)).pack(pady=4)
@@ -594,14 +643,14 @@ class RelayPollerManager:
 # Główne okno
 # ─────────────────────────────────────────────────────────────────
 class HushboxApp(ctk.CTk):
-    def __init__(self):
+    def __init__(self, passphrase: str | None = None):
         super().__init__()
         self.title("Hushbox 🔐")
         self.geometry("1200x720")
         self.minsize(900, 580)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self._enc      = EncryptionManager(data_dir=DATA_DIR)
+        self._enc      = EncryptionManager(data_dir=DATA_DIR, passphrase=passphrase)
         self._store    = ChatStore(data_dir=DATA_DIR)
         self._settings = AppSettings(data_dir=DATA_DIR)
         self._poller   = RelayPollerManager()
@@ -688,13 +737,47 @@ class HushboxApp(ctk.CTk):
         except Exception:
             return None
 
+    def _confirm_key_change(self, exc: KeyConflictError) -> bool:
+        """Poproś użytkownika o zgodę na podmianę klucza istniejącego kontaktu.
+
+        Zmieniony klucz to albo faktyczna reinstalacja u rozmówcy, albo próba
+        podszycia się (MITM). Rozstrzygnąć to może wyłącznie człowiek, więc
+        pokazujemy oba fingerprinty i domyślnie odmawiamy.
+        """
+        return messagebox.askyesno(
+            "Public key changed",
+            f"'{exc.name}' already exists with a different public key.\n\n"
+            f"Stored fingerprint:\n{exc.old_fingerprint}\n\n"
+            f"New fingerprint:\n{exc.new_fingerprint}\n\n"
+            "This is expected if the contact reinstalled the app. It can also "
+            "mean someone is impersonating them. Confirm the new fingerprint "
+            "with the contact over a separate channel before accepting.\n\n"
+            "Replace the stored key?",
+            default=messagebox.NO,
+            icon=messagebox.WARNING,
+            parent=self,
+        )
+
+    def _store_contact(self, name: str, key: str, relay_url: str) -> bool:
+        """``add_contact`` z obsługą konfliktu klucza. ``False`` = anulowano."""
+        try:
+            self._enc.add_contact(name, key, relay_url=relay_url)
+            return True
+        except KeyConflictError as exc:
+            if not self._confirm_key_change(exc):
+                return False
+            self._enc.add_contact(name, key, relay_url=relay_url,
+                                  allow_key_change=True)
+            return True
+
     def _add_contact(self):
         dlg = ContactDialog(self, title="Add contact")
         self.wait_window(dlg)
         if dlg.result:
             name, key, relay_url = dlg.result
             try:
-                self._enc.add_contact(name, key, relay_url=relay_url)
+                if not self._store_contact(name, key, relay_url):
+                    return
                 self._refresh_contacts()
                 self._open_chat(name)
             except Exception as e:
@@ -717,7 +800,8 @@ class HushboxApp(ctk.CTk):
                         old_p.rename(new_p)
                     self._close_tab(name)
                     name = new_name
-                self._enc.add_contact(name, new_key, relay_url=relay_url)
+                if not self._store_contact(name, new_key, relay_url):
+                    return
                 self._refresh_contacts()
                 if name in self._tabs:
                     self._tabs[name].refresh_relay_state(self._poller.transport)
@@ -851,7 +935,8 @@ class HushboxApp(ctk.CTk):
         if dlg.result:
             name, key, relay_url = dlg.result
             try:
-                self._enc.add_contact(name, key, relay_url=relay_url)
+                if not self._store_contact(name, key, relay_url):
+                    return
                 self._refresh_contacts()
                 self._open_chat(name)
             except Exception as e:
@@ -870,4 +955,14 @@ class HushboxApp(ctk.CTk):
 if __name__ == "__main__":
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
-    HushboxApp().mainloop()
+
+    # Hasło musi być znane PRZED zbudowaniem okna, bo bez niego nie da się
+    # wczytać klucza prywatnego. Tk potrzebuje korzenia do okna dialogowego,
+    # więc pytamy w tymczasowym, ukrytym oknie.
+    _root = tk.Tk()
+    _root.withdraw()
+    _passphrase = unlock_private_key()
+    _root.destroy()
+
+    if _passphrase is not False:
+        HushboxApp(passphrase=_passphrase).mainloop()
