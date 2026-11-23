@@ -1,4 +1,0 @@
-customtkinter
-Pillow
-segno
--e ../../packages/hushbox-core
