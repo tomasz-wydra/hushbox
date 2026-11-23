@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 RelayTransport — wysyłanie i odbieranie zaszyfrowanych wiadomości przez Hushbox Relay.
 

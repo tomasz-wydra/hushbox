@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Format pliku klucza prywatnego — wersjonowany, opcjonalnie chroniony hasłem.
 
 Historycznie ``my_private_key.bin`` przechowywał 32 surowe bajty klucza NaCl bez
