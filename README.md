@@ -105,6 +105,10 @@ pytest packages/hushbox-core/tests/ -v
 pytest services/hushbox-relay-api/tests/ -v
 ```
 
+## Contributing
+
+Contributions are welcome. Every commit must be signed off under the Developer Certificate of Origin (`git commit -s`). See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 `hushbox-core` is licensed under the **Apache License 2.0** (releases up to and including 0.3.0 were MIT).
