@@ -31,13 +31,13 @@ Reports in English or Polish are welcome.
 
 | Step | Target time |
 |------|-------------|
-| Acknowledgement of your report | within 5 business days |
-| Initial assessment (confirmed / not a vulnerability / need more information) | within 14 days |
+| Acknowledgement of your report | within 21 days |
+| Initial assessment (confirmed / not a vulnerability / need more information) | within 45 days |
 | Fix or mitigation for confirmed issues | within 90 days, sooner for critical issues |
 
 We follow coordinated disclosure: please give us the time above before publishing. Once a fix is released, we publish a GitHub security advisory and, if you agree, credit you by name.
 
-These are targets for a small, maintainer-run project, not a contractual SLA.
+Hushbox is maintained by a single person, so these are targets that leave room for travel and holidays, not a contractual SLA. Critical issues are handled as soon as possible.
 
 ## Scope
 
