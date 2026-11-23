@@ -46,7 +46,7 @@ Do not add code copied from projects under incompatible licenses (for example GP
 
 ## Security issues
 
-Do not report vulnerabilities in public issues or pull requests. Contact the maintainer privately through GitHub (repository **Security** tab → **Report a vulnerability**).
+Do not report vulnerabilities in public issues or pull requests. Contact the maintainer privately through GitHub (repository **Security** tab → **Report a vulnerability**). Details, scope and response times are in [SECURITY.md](SECURITY.md).
 
 ## Practical rules
 

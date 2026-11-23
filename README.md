@@ -94,6 +94,8 @@ Then: **⚙ Settings** → enter relay URL (e.g. `https://relay.domain.com:5001`
 - Relay server sees only: SHA-256 key hashes + encrypted blobs
 - No accounts, no phone numbers, no telemetry
 
+Known limitations and how to report a vulnerability: see [SECURITY.md](SECURITY.md).
+
 ## Development
 
 ```bash
