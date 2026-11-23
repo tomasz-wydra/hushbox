@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Ustawienia aplikacji Hushbox — persystowane w settings.json.
 

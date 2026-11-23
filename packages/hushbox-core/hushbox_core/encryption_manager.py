@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 EncryptionManager — obsługuje klucze NaCl i szyfrowanie/deszyfrowanie wiadomości.
 

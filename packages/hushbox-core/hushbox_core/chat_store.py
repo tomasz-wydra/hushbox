@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 ChatStore - przechowuje historię rozmów i zarządza wiadomościami.
 """

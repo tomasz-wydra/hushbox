@@ -11,7 +11,7 @@ End-to-end encrypted messaging using NaCl/Curve25519. No accounts — just keys.
 ```
 hushbox/
 ├── packages/
-│   └── hushbox-core/                   # E2E crypto core — MIT
+│   └── hushbox-core/                   # E2E crypto core — Apache-2.0
 │       ├── hushbox_core/
 │       │   ├── encryption_manager.py   # NaCl keypairs, encrypt/decrypt
 │       │   ├── chat_store.py           # Message history (JSON)
@@ -49,7 +49,7 @@ hushbox/
          └───────────┬───────────┘
                      │  uses
               ┌──────▼──────┐
-              │ hushbox-core │   MIT — public API, auditable
+              │ hushbox-core │   Apache-2.0 — public API, auditable
               │  (Python pkg)│
               └──────┬───────┘
                      │  HTTP (long polling)
@@ -82,7 +82,7 @@ Then: **⚙ Settings** → enter relay URL (e.g. `https://relay.domain.com:5001`
 
 | Package | Description | License |
 |---------|-------------|---------|
-| `hushbox-core` | Crypto, storage, transport | MIT |
+| `hushbox-core` | Crypto, storage, transport | Apache-2.0 |
 | `hushbox-relay-api` | Relay server | MIT |
 | `hushbox-web` | Desktop client | MIT |
 | `hushbox-mobile` | Mobile client (planned; design-only for now) | TBD |
@@ -105,7 +105,12 @@ pytest packages/hushbox-core/tests/ -v
 pytest services/hushbox-relay-api/tests/ -v
 ```
 
+## Contributing
+
+Contributions are welcome. Every commit must be signed off under the Developer Certificate of Origin (`git commit -s`). See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
-All packages in this repository are licensed under the **MIT License** unless noted otherwise.
+`hushbox-core` is licensed under the **Apache License 2.0** (releases up to and including 0.3.0 were MIT).
+All other packages in this repository are licensed under the **MIT License** unless noted otherwise.
 See individual `LICENSE` files in each package/service directory.

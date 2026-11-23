@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Wyjątki domenowe hushbox-core.
 
 Warstwa UI powinna łapać wyłącznie te wyjątki i nigdy nie eksponować
