@@ -8,9 +8,7 @@ Hushbox is end-to-end encryption software, so security reports get priority over
 |-----------|-----------|
 | `hushbox-core` – latest released minor version | ✅ security fixes |
 | `hushbox-core` – older versions | ❌ please upgrade |
-| `hushbox-relay-api` – `main` branch | ✅ security fixes |
-| `hushbox-web` – `main` branch | ✅ best effort |
-| `hushbox-mobile` | not released, design only |
+| Code under the `legacy-0.3` tag (demo relay and desktop client) | ❌ unmaintained, do not deploy |
 
 ## Reporting a vulnerability
 
@@ -44,8 +42,9 @@ Hushbox is maintained by a single person, so these are targets that leave room f
 In scope:
 
 - cryptography and key handling in `packages/hushbox-core` (encryption, key file format, fingerprints, contact key changes),
-- the relay server in `services/hushbox-relay-api`,
-- the desktop client in `clients/hushbox-web`.
+- the relay transport client in `packages/hushbox-core`.
+
+Vulnerabilities in NULLGIS itself (desktop application or relay server) can be reported the same way.
 
 Out of scope:
 
@@ -53,6 +52,7 @@ Out of scope:
 - denial of service by sending large volumes of traffic to a self-hosted relay,
 - social engineering of users or the maintainer,
 - vulnerabilities in third-party dependencies without a demonstrated impact on Hushbox (please report those upstream),
+- code under the `legacy-0.3` tag,
 - the known limitations listed below.
 
 ## Known limitations
@@ -61,7 +61,7 @@ These are documented design properties, not vulnerabilities. Reports that only r
 
 - **No forward secrecy.** Messages are encrypted with static X25519 keys (NaCl `Box`). If a private key is compromised, previously captured ciphertexts from or to that key can be decrypted.
 - **Relay metadata.** The relay sees SHA-256 hashes of the sender's and recipient's public keys, message sizes and timing. It never sees plaintext.
-- **No mailbox authentication in the public relay.** In `services/hushbox-relay-api` anyone who knows a recipient's public key hash can fetch that mailbox's ciphertexts and delete them. Content stays confidential, but messages can be read as ciphertext, dropped or delayed. Run the relay only where this is acceptable.
+- **`RelayTransport` does not authenticate to the mailbox.** The client in `hushbox-core` polls and acknowledges messages by recipient hash only. A relay that accepts such requests lets anyone who knows a public key hash fetch that mailbox's ciphertexts and delete them; content stays confidential, but messages can be dropped or delayed. Applications should use a relay with mailbox authentication.
 - **No replay protection in the message format.** A ciphertext delivered again (by the relay or through a copy-paste channel) is accepted again by the client.
 - **Trust on first use.** A contact's identity is only as strong as the out-of-band fingerprint check. `hushbox-core` tracks a `verified` flag per contact and refuses silent key changes, but it is up to the client to show unverified contacts clearly.
 - **Optional key passphrase.** The private key file is protected with Argon2id only if the user sets a passphrase; legacy unencrypted key files are still accepted.

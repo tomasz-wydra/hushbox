@@ -1,96 +1,27 @@
 # Hushbox 🔐
 
-End-to-end encrypted messaging using NaCl/Curve25519. No accounts — just keys. Relay is blind to content.
+Open-source end-to-end encryption core used by [NULLGIS](https://nullgis.com). NaCl/Curve25519 keys, no accounts. The relay that carries messages is blind to their content.
 
-## Screenshot
-
-![Hushbox edit contact UI](docs/images/hushbox-edit-contact.png)
+This repository contains **`hushbox-core`**, the public, auditable part of the system: key management, the private key file format, contact verification and the relay transport client. Applications, the relay server and storage of chat history are not part of this repository.
 
 ## Structure
 
 ```
 hushbox/
-├── packages/
-│   └── hushbox-core/                   # E2E crypto core — Apache-2.0
-│       ├── hushbox_core/
-│       │   ├── encryption_manager.py   # NaCl keypairs, encrypt/decrypt
-│       │   ├── chat_store.py           # Message history (JSON)
-│       │   ├── relay_transport.py      # HTTP relay client (long polling)
-│       │   └── app_settings.py         # Persistent settings
-│       └── tests/
-│
-├── services/
-│   └── hushbox-relay-api/              # Store-and-forward relay server — MIT
-│       ├── hushbox_relay_api/
-│       │   └── server.py               # Flask + MongoDB
-│       ├── Dockerfile
-│       └── docker-compose.yml
-│
-├── clients/
-│     ├── hushbox-web/                  # Desktop GUI (customtkinter) — MIT
-│     │   └── main.py
-│     └── hushbox-mobile/               # Mobile client — planned
-│         ├── README.md
-│         └── ROADMAP.md
-│         
-└── docs/
-    └── images/                         # UI screenshots
-
+└── packages/
+    └── hushbox-core/                   # E2E crypto core — Apache-2.0
+        ├── hushbox_core/
+        │   ├── encryption_manager.py   # NaCl keypairs, contacts, encrypt/decrypt, TOFU
+        │   ├── keyfile.py              # Versioned private key file (Argon2id + SecretBox)
+        │   ├── relay_transport.py      # HTTP relay client (long polling)
+        │   └── errors.py               # Domain exceptions
+        └── tests/
 ```
-
-## Architecture
-
-```
-┌─────────────────┐     ┌─────────────────┐
-│  hushbox-web    │     │  hushbox-mobile  │
-│  (customtkinter)│     │  (Kivy / native) │
-└────────┬────────┘     └────────┬─────────┘
-         │                       │
-         └───────────┬───────────┘
-                     │  uses
-              ┌──────▼──────┐
-              │ hushbox-core │   Apache-2.0 — public API, auditable
-              │  (Python pkg)│
-              └──────┬───────┘
-                     │  HTTP (long polling)
-              ┌──────▼───────────────┐
-              │  hushbox-relay-api   │   your own Docker
-              │  Flask + MongoDB     │
-              └──────────────────────┘
-```
-
-## Quick Start
-
-### 1. Start relay server
-
-```bash
-cd services/hushbox-relay-api
-docker compose up -d
-```
-
-### 2. Run desktop client
-
-```bash
-cd clients/hushbox-web
-pip install -r requirements.txt
-python main.py
-```
-
-Then: **⚙ Settings** → enter relay URL (e.g. `https://relay.domain.com:5001`) → Save.
-
-## Packages
-
-| Package | Description | License |
-|---------|-------------|---------|
-| `hushbox-core` | Crypto, storage, transport | Apache-2.0 |
-| `hushbox-relay-api` | Relay server | MIT |
-| `hushbox-web` | Desktop client | MIT |
-| `hushbox-mobile` | Mobile client (planned; design-only for now) | TBD |
 
 ## Security Model
 
 - **NaCl Box** (X25519 + XSalsa20-Poly1305) — authenticated E2E encryption
-- Private key never leaves the device (`my_private_key.bin` / Keychain)
+- Private key never leaves the device; optional Argon2id passphrase protection at rest
 - Relay server sees only: SHA-256 key hashes + encrypted blobs
 - No accounts, no phone numbers, no telemetry
 
@@ -99,13 +30,15 @@ Known limitations and how to report a vulnerability: see [SECURITY.md](SECURITY.
 ## Development
 
 ```bash
-# Install core in editable mode
-pip install -e packages/hushbox-core
-
-# Run all tests
+pip install -e "packages/hushbox-core[dev]"
 pytest packages/hushbox-core/tests/ -v
-pytest services/hushbox-relay-api/tests/ -v
 ```
+
+Usage examples are in [packages/hushbox-core/README.md](packages/hushbox-core/README.md).
+
+## Historical demo
+
+Earlier versions of this repository also shipped a demo relay server (`hushbox-relay-api`) and a demo desktop client (`hushbox-web`). They are preserved under the tag [`legacy-0.3`](https://github.com/tomasz-wydra/hushbox/tree/legacy-0.3) for reference only. They are **unmaintained, not covered by the security policy and must not be deployed**; the legacy relay has no mailbox authentication.
 
 ## Contributing
 
@@ -113,6 +46,4 @@ Contributions are welcome. Every commit must be signed off under the Developer C
 
 ## License
 
-`hushbox-core` is licensed under the **Apache License 2.0** (releases up to and including 0.3.0 were MIT).
-All other packages in this repository are licensed under the **MIT License** unless noted otherwise.
-See individual `LICENSE` files in each package/service directory.
+`hushbox-core` is licensed under the **Apache License 2.0** (releases up to and including 0.3.0 were MIT). See [packages/hushbox-core/LICENSE](packages/hushbox-core/LICENSE).

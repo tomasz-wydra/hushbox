@@ -34,15 +34,9 @@ Pull requests from forks are checked automatically by the **DCO** workflow. A pu
 
 ## Licensing of contributions
 
-Contributions are accepted under the license of the directory they change ("inbound = outbound"):
+Contributions are accepted under the license of the code they change ("inbound = outbound"). `packages/hushbox-core/` is licensed under the Apache License 2.0.
 
-| Path | License |
-|------|---------|
-| `packages/hushbox-core/` | Apache License 2.0 |
-| `services/hushbox-relay-api/` | MIT |
-| `clients/hushbox-web/` | MIT |
-
-Do not add code copied from projects under incompatible licenses (for example GPL code into the Apache-2.0 or MIT parts).
+Do not add code copied from projects under incompatible licenses (for example GPL code).
 
 ## Security issues
 
@@ -57,5 +51,4 @@ Do not report vulnerabilities in public issues or pull requests. Contact the mai
   ```bash
   pip install -e "packages/hushbox-core[dev]"
   pytest packages/hushbox-core/tests/ -v
-  pytest services/hushbox-relay-api/tests/ -v
   ```
