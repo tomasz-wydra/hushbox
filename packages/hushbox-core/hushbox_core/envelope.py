@@ -353,7 +353,8 @@ class ReplayStore(Protocol):
     :class:`~hushbox_core.EncryptionManager` uses the sender's ``pubkey_hash``,
     so renaming a contact does not reset its history.
 
-    Implementations must be safe to call from several threads.
+    Implementations must be safe to call from several threads. Whether they
+    must also be safe across processes depends on how they are shared.
     """
 
     def contains(self, sender: str, message_id: str) -> bool:
@@ -408,6 +409,13 @@ class JsonFileReplayStore(MemoryReplayStore):
     """Store persisted as a JSON file, rewritten atomically on every change.
 
     A reference implementation for :class:`~hushbox_core.EncryptionManager`.
+
+    **One process per file.** The register lives in memory and the whole
+    file is rewritten on every change, so two processes using the same file
+    (say an application and a command-line tool on one data directory)
+    overwrite each other's entries, and the lost IDs can be replayed. Share a
+    register between processes through a :class:`ReplayStore` backed by a
+    database instead.
     Every accepted message rewrites the whole file, which is fine for the
     message volume of one person but not for a server; applications with a
     database should implement :class:`ReplayStore` on top of it, ideally in

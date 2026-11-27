@@ -153,7 +153,11 @@ class EncryptionManager:
                  max_clock_skew: float = MAX_CLOCK_SKEW,
                  clock: Clock = time.time):
         """
-        :param data_dir: katalog na klucz prywatny i kontakty.
+        :param data_dir: katalog na klucz prywatny i kontakty. Only one
+            process may use a data directory at a time: contacts and the
+            default replay register are kept in memory and rewritten as whole
+            files, so a second process would overwrite the first one's
+            changes (lost contacts, replayable messages).
         :param passphrase: hasło do klucza prywatnego. Wymagane tylko wtedy, gdy
             plik klucza jest chroniony hasłem — sprawdź to bez hasła przez
             :func:`hushbox_core.keyfile.path_is_encrypted`. Jeśli podane przy

@@ -175,6 +175,11 @@ receive window: not older than 30 days and not more than 10 minutes in the futur
 (both configurable). Accepted IDs are kept in `seen_messages.json` next to the key
 and pruned once they fall out of the window.
 
+Use a data directory from **one process at a time**. Contacts and the default
+register are kept in memory and rewritten as whole files, so a second process
+on the same directory would overwrite the first one's changes. To share a
+register between processes, pass a database-backed `ReplayStore`.
+
 ```python
 sent = mgr.encrypt_message("Alice", "Hello")      # .ciphertext, .message_id, .timestamp_ms, .type
 msg = mgr.decrypt_message("Alice", ciphertext)    # .text, .type, .message_id, .timestamp_ms, .sent_at

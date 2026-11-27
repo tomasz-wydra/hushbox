@@ -9,8 +9,10 @@ description = "E2E encryption core for Hushbox — NaCl keys, key file format, m
 license = {text = "Apache-2.0"}
 requires-python = ">=3.12"
 dependencies = [
-    "pynacl",
-    "httpx",
+    # Minimums verified by running the test suite on Python 3.12 and 3.13:
+    # httpx < 0.23.1 imports the "cgi" module removed in Python 3.13.
+    "pynacl>=1.5",
+    "httpx>=0.23.1",
 ]
 
 [project.optional-dependencies]

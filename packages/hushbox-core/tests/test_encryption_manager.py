@@ -285,6 +285,7 @@ class TestPrivateKeyAtRest:
         pub = mgr1.export_public_key()
         assert EncryptionManager(data_dir=tmp_dir).export_public_key() == pub
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file permissions only")
     def test_key_file_has_owner_only_permissions(self, tmp_dir):
         EncryptionManager(data_dir=tmp_dir)
         path = Path(tmp_dir) / "my_private_key.bin"
