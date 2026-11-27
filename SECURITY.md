@@ -42,7 +42,7 @@ Hushbox is maintained by a single person, so these are targets that leave room f
 In scope:
 
 - cryptography and key handling in `packages/hushbox-core` (encryption, key file format, fingerprints, contact key changes),
-- the relay transport client, the QR payload format and the Ed25519 signing key and signatures in `packages/hushbox-core`.
+- the relay client and its mailbox authentication (`relay_auth`, specified in `docs/relay-auth.md`), the QR payload format and the Ed25519 signing key and signatures in `packages/hushbox-core`.
 
 Vulnerabilities in NULLGIS itself (desktop application or relay server) can be reported the same way.
 
@@ -61,7 +61,7 @@ These are documented design properties, not vulnerabilities. Reports that only r
 
 - **No forward secrecy.** Messages are encrypted with static X25519 keys (NaCl `Box`). If a private key is compromised, previously captured ciphertexts from or to that key can be decrypted.
 - **Relay metadata.** The relay sees SHA-256 hashes of the sender's and recipient's public keys, message sizes and timing. It never sees plaintext.
-- **`RelayTransport` does not authenticate to the mailbox.** The client in `hushbox-core` polls and acknowledges messages by recipient hash only. A relay that accepts such requests lets anyone who knows a public key hash fetch that mailbox's ciphertexts and delete them; content stays confidential, but messages can be dropped or delayed. Applications should use a relay with mailbox authentication.
+- **Relay sessions are bearer tokens.** Mailbox access uses a short-lived token obtained by challenge-response (`docs/relay-auth.md`). Whoever obtains the token, for example a TLS terminator in front of the relay, can read and delete that mailbox's ciphertexts until the session expires or is revoked. The `from` field of a sent message is not authenticated by the relay.
 - **Replay protection is local and time-bounded.** Since 0.5.0 each message carries a random ID and a sender timestamp inside the ciphertext (since 0.6.0 also a content type). A receiver accepts a message once per sender and ID, and only if its timestamp is within the receive window (default: 30 days back, 10 minutes ahead). The register of seen IDs lives on each device: a second device, or a device whose data directory was wiped, can accept a replay of a message that is still inside the window. The timestamp is the sender's clock and is not verified by any third party. File packages (content type `FILE_PACKAGE`) are deliberately exempt: they can be opened any number of times and at any age. The content type keeps them apart from messages, so a package cannot be replayed as a message.
 - **No message ordering or loss detection.** The envelope has no sequence number, so a relay can drop or reorder messages without the receiver noticing.
 - **Trust on first use.** A contact's identity is only as strong as the out-of-band fingerprint check. `hushbox-core` tracks a `verified` flag per contact and refuses silent key changes, but it is up to the client to show unverified contacts clearly.
