@@ -84,19 +84,53 @@ any key change resets `verified` to `False`.
 
 ## Message format and replay protection
 
-Since 0.5.0 every message is a versioned envelope (`hushbox_core.envelope`):
+Every message is a versioned envelope (`hushbox_core.envelope`), format v2 since 0.6.0:
 
 ```
-base64( "HBM1" | version=1 | Box(nonce || ciphertext) )
-Box plaintext: header copy (5 B) | message ID (16 random bytes) | timestamp ms (uint64 BE) | UTF-8 body
+base64( "HBM1" | version=2 | Box(nonce || ciphertext) )
+Box plaintext: header copy (5 B) | content type (1 B) | message ID (16 random bytes) | timestamp ms (uint64 BE) | UTF-8 body
 ```
 
-The message ID and timestamp are inside the ciphertext, so the relay sees neither.
-The header is repeated inside the ciphertext because NaCl `Box` has no associated
-data; comparing the two copies binds the version to the authenticated content.
+The content type, message ID and timestamp are inside the ciphertext, so the
+relay sees none of them. The header is repeated inside the ciphertext because
+NaCl `Box` has no associated data; comparing the two copies binds the version
+to the authenticated content. The envelope adds 75 bytes (`envelope.OVERHEAD`).
 
-**Breaking change:** bare `Box` ciphertexts written by 0.4.0 and earlier are
-rejected with `InvalidCiphertextFormat`. All parties must upgrade together.
+**Breaking changes:** bare `Box` ciphertexts written by 0.4.0 and earlier are
+rejected with `InvalidCiphertextFormat`, and v1 envelopes from 0.5.0 with
+`UnsupportedMessageFormat`. All parties must upgrade together.
+
+### Content types
+
+| Value | `MessageType` | Meaning |
+|---|---|---|
+| 1 | `TEXT` | text shown to the user (default) |
+| 2 | `FILE_DESCRIPTOR` | message announcing a stored file package (body defined by the application) |
+| 3 | `FILE_PACKAGE` | encrypted file package: a stored object, **not** a message |
+| 4–127 | – | reserved for future core types (read receipts, group headers, key rotation) |
+| 128–255 | – | application-specific, opaque to the core |
+| 0 | – | invalid |
+
+An unknown core type raises `UnsupportedMessageType`, so an older client can
+ask the user to update instead of showing a control message as text.
+
+```python
+mgr.encrypt("Alice", '{"object_ref": "..."}', type=MessageType.FILE_DESCRIPTOR)
+msg = mgr.decrypt_message("Alice", ciphertext)   # msg.type tells what it is
+mgr.decrypt("Alice", ciphertext)                 # TEXT only, else UnexpectedMessageType
+
+pkg = mgr.encrypt("Alice", package_json, type=MessageType.FILE_PACKAGE)
+mgr.open_package("Alice", pkg)                   # any number of times, any age
+```
+
+File packages are opened with `open_package()`: authenticity and type are
+checked, the replay register and the receive window are not, so a package can
+be downloaded again or opened months later. The message path refuses packages
+and `open_package()` refuses messages; the content type makes this binding
+cryptographic, so a package cannot be replayed as a message or the other way
+round.
+
+### Replay protection
 
 `decrypt()` accepts a message once per sender and message ID, and only inside the
 receive window: not older than 30 days and not more than 10 minutes in the future
@@ -104,8 +138,8 @@ receive window: not older than 30 days and not more than 10 minutes in the futur
 and pruned once they fall out of the window.
 
 ```python
-sent = mgr.encrypt_message("Alice", "Hello")      # .ciphertext, .message_id, .timestamp_ms
-msg = mgr.decrypt_message("Alice", ciphertext)    # .text, .message_id, .timestamp_ms, .sent_at
+sent = mgr.encrypt_message("Alice", "Hello")      # .ciphertext, .message_id, .timestamp_ms, .type
+msg = mgr.decrypt_message("Alice", ciphertext)    # .text, .type, .message_id, .timestamp_ms, .sent_at
 mgr.decrypt("Alice", ciphertext)                  # second time: ReplayedMessage
 ```
 
@@ -137,10 +171,12 @@ All exceptions derive from `HushboxError`:
 | `KeyConflictError` | a contact already exists with a different public key |
 | `FingerprintMismatch` | `verify_contact` received a fingerprint that does not match |
 | `InvalidCiphertextFormat` | the ciphertext is not valid base64, has no envelope header (pre-0.5.0 message) or is truncated |
-| `UnsupportedMessageFormat` | the envelope comes from a newer format version |
+| `UnsupportedMessageFormat` | the envelope uses another format version (newer, or v1 from 0.5.0) |
+| `UnsupportedMessageType` | the content type is not defined in this version (subclass of the above) |
+| `UnexpectedMessageType` | a known type in the wrong place (package to the message path, non-text to `decrypt()`) |
 | `MessageExpired` | the message timestamp is outside the receive window |
 | `ReplayedMessage` | the same message (sender + message ID) was already accepted |
-| `DecryptionError` | decryption or authentication failed (parent of the five above) |
+| `DecryptionError` | decryption or authentication failed (parent of the seven above) |
 | `ReplayStoreError` | the register of received messages cannot be read (corrupted file) |
 
 `decrypt()` raises `DecryptionError` rather than leaking `nacl.exceptions.CryptoError`,

@@ -11,6 +11,7 @@ from .envelope import (
     EncryptedMessage,
     JsonFileReplayStore,
     MemoryReplayStore,
+    MessageType,
     ReplayStore,
 )
 from .relay_transport import RelayTransport, pubkey_to_hash
@@ -26,6 +27,8 @@ from .errors import (
     DecryptionError,
     InvalidCiphertextFormat,
     UnsupportedMessageFormat,
+    UnsupportedMessageType,
+    UnexpectedMessageType,
     MessageExpired,
     ReplayedMessage,
     ReplayStoreError,
@@ -36,7 +39,7 @@ __all__ = [
     "fingerprint_for_pubkey", "normalize_fingerprint",
     "RelayTransport", "pubkey_to_hash",
     "keyfile", "envelope",
-    "EncryptedMessage", "DecryptedMessage",
+    "EncryptedMessage", "DecryptedMessage", "MessageType",
     "ReplayStore", "MemoryReplayStore", "JsonFileReplayStore",
     # wyjątki domenowe
     "HushboxError",
@@ -44,6 +47,7 @@ __all__ = [
     "UnsupportedKeyFormat",
     "ContactError", "KeyConflictError", "FingerprintMismatch",
     "DecryptionError", "InvalidCiphertextFormat",
-    "UnsupportedMessageFormat", "MessageExpired", "ReplayedMessage",
+    "UnsupportedMessageFormat", "UnsupportedMessageType", "UnexpectedMessageType",
+    "MessageExpired", "ReplayedMessage",
     "ReplayStoreError",
 ]

@@ -74,7 +74,17 @@ class InvalidCiphertextFormat(DecryptionError):
 
 
 class UnsupportedMessageFormat(DecryptionError):
-    """The envelope comes from a newer, unsupported format version."""
+    """The envelope uses a format version this release does not accept."""
+
+
+class UnsupportedMessageType(UnsupportedMessageFormat):
+    """The envelope's content type is not defined in this release (for
+    example a message type added by a newer client)."""
+
+
+class UnexpectedMessageType(DecryptionError):
+    """A known content type in the wrong place, for example a file package
+    passed to the message path or a file descriptor to ``decrypt()``."""
 
 
 class MessageExpired(DecryptionError):

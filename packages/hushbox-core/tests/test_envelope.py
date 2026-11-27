@@ -8,6 +8,9 @@ from nacl.public import Box, PrivateKey
 
 from hushbox_core import (
     DecryptedMessage,
+    MessageType,
+    UnexpectedMessageType,
+    UnsupportedMessageType,
     DecryptionError,
     EncryptionManager,
     InvalidCiphertextFormat,
@@ -67,6 +70,16 @@ def _b64(raw: bytes) -> str:
     return base64.b64encode(raw).decode()
 
 
+def _inner(content_type=1, body=b"x", header=None, ts=None):
+    """Hand-built v2 inner plaintext for forging test envelopes."""
+    return ((header or envelope.HEADER) + bytes([content_type]) + b"\x00" * 16
+            + (NOW_MS if ts is None else ts).to_bytes(8, "big") + body)
+
+
+def _forge(box, inner, outer=None):
+    return _b64((outer or envelope.HEADER) + bytes(box.encrypt(inner)))
+
+
 # ─────────────────────────────────────────────────────────────────
 # Wire format
 # ─────────────────────────────────────────────────────────────────
@@ -77,14 +90,15 @@ class TestWireFormat:
         sealed = envelope.seal(keys[0], "hi", clock=FakeClock())
         raw = _raw(sealed.ciphertext)
         assert raw[:4] == b"HBM1"
-        assert raw[4] == 1
+        assert raw[4] == 2
 
     def test_roundtrip_carries_id_and_timestamp(self, keys):
         mid = bytes(range(16))
         sealed = envelope.seal(keys[0], "Zażółć gęślą jaźń 🔐",
                                message_id=mid, timestamp_ms=1234567)
         opened = envelope.open_envelope(keys[1], sealed.ciphertext)
-        assert opened == DecryptedMessage("Zażółć gęślą jaźń 🔐", mid.hex(), 1234567)
+        assert opened == DecryptedMessage("Zażółć gęślą jaźń 🔐", mid.hex(), 1234567,
+                                          MessageType.TEXT)
         assert sealed.message_id == mid.hex()
         assert sealed.timestamp_ms == 1234567
 
@@ -141,9 +155,16 @@ class TestRejectedInputs:
 
     def test_newer_version_is_reported_as_unsupported(self, keys):
         raw = bytearray(_raw(envelope.seal(keys[0], "x").ciphertext))
-        raw[4] = 2
-        with pytest.raises(UnsupportedMessageFormat):
+        raw[4] = 3
+        with pytest.raises(UnsupportedMessageFormat, match="Zaktualizuj"):
             envelope.open_envelope(keys[1], _b64(bytes(raw)))
+
+    def test_v1_envelope_from_0_5_is_rejected(self, keys):
+        """v1 (hushbox-core 0.5.0) never shipped in a client; not accepted."""
+        v1_header = b"HBM1\x01"
+        inner = v1_header + b"\x00" * 16 + NOW_MS.to_bytes(8, "big") + b"x"
+        with pytest.raises(UnsupportedMessageFormat, match="starszym"):
+            envelope.open_envelope(keys[1], _forge(keys[0], inner, outer=v1_header))
 
     def test_unsupported_format_is_a_decryption_error(self):
         assert issubclass(UnsupportedMessageFormat, DecryptionError)
@@ -176,10 +197,9 @@ class TestRejectedInputs:
 
     def test_inner_header_must_match_outer(self, keys):
         """A payload sealed under another version cannot be relabelled."""
-        inner = b"HBM\x01\x02" + b"\x00" * 16 + NOW_MS.to_bytes(8, "big") + b"x"
-        forged = envelope.HEADER + bytes(keys[0].encrypt(inner))
+        inner = _inner(header=b"HBM1\x03")
         with pytest.raises(DecryptionError, match="Nagłówek"):
-            envelope.open_envelope(keys[1], _b64(forged))
+            envelope.open_envelope(keys[1], _forge(keys[0], inner))
 
     def test_short_inner_payload(self, keys):
         forged = envelope.HEADER + bytes(keys[0].encrypt(envelope.HEADER + b"\x00" * 10))
@@ -187,10 +207,8 @@ class TestRejectedInputs:
             envelope.open_envelope(keys[1], _b64(forged))
 
     def test_non_utf8_body(self, keys):
-        inner = envelope.HEADER + b"\x00" * 16 + NOW_MS.to_bytes(8, "big") + b"\xff\xfe"
-        forged = envelope.HEADER + bytes(keys[0].encrypt(inner))
         with pytest.raises(DecryptionError, match="UTF-8"):
-            envelope.open_envelope(keys[1], _b64(forged))
+            envelope.open_envelope(keys[1], _forge(keys[0], _inner(body=b"\xff\xfe")))
 
     def test_no_nacl_exception_leaks(self, keys):
         from nacl.exceptions import CryptoError
@@ -202,6 +220,60 @@ class TestRejectedInputs:
             pass
         except CryptoError:
             pytest.fail("CryptoError leaked out of hushbox_core")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Content types
+# ─────────────────────────────────────────────────────────────────
+
+class TestContentTypes:
+
+    @pytest.mark.parametrize("t", list(MessageType) + [128, 200, 255])
+    def test_type_roundtrips(self, keys, t):
+        sealed = envelope.seal(keys[0], "body", type=t)
+        opened = envelope.open_envelope(keys[1], sealed.ciphertext)
+        assert opened.type == t == sealed.type
+        assert opened.text == "body"
+
+    def test_core_types_come_back_as_enum(self, keys):
+        opened = envelope.open_envelope(
+            keys[1], envelope.seal(keys[0], "x", type=2).ciphertext)
+        assert opened.type is MessageType.FILE_DESCRIPTOR
+
+    def test_default_type_is_text(self, keys):
+        assert envelope.seal(keys[0], "x").type is MessageType.TEXT
+
+    def test_type_is_inside_the_ciphertext(self, keys):
+        a = _raw(envelope.seal(keys[0], "x", type=1, message_id=b"\0" * 16,
+                               timestamp_ms=0).ciphertext)
+        b = _raw(envelope.seal(keys[0], "x", type=3, message_id=b"\0" * 16,
+                               timestamp_ms=0).ciphertext)
+        assert a[:5] == b[:5] and len(a) == len(b)
+
+    @pytest.mark.parametrize("bad", [0, 4, 127, 256, -1, True, "1", 1.0])
+    def test_seal_rejects_undefined_types(self, keys, bad):
+        with pytest.raises(UnsupportedMessageType):
+            envelope.seal(keys[0], "x", type=bad)
+
+    @pytest.mark.parametrize("bad", [0, 4, 127])
+    def test_unknown_type_on_the_wire_is_unsupported(self, keys, bad):
+        with pytest.raises(UnsupportedMessageType, match="Zaktualizuj"):
+            envelope.open_envelope(keys[1], _forge(keys[0], _inner(content_type=bad)))
+
+    def test_unsupported_type_is_a_format_and_decryption_error(self):
+        assert issubclass(UnsupportedMessageType, UnsupportedMessageFormat)
+        assert issubclass(UnexpectedMessageType, DecryptionError)
+
+    def test_allowed_types(self, keys):
+        ct = envelope.seal(keys[0], "x", type=MessageType.FILE_PACKAGE).ciphertext
+        envelope.open_envelope(keys[1], ct, allowed_types=(MessageType.FILE_PACKAGE,))
+        with pytest.raises(UnexpectedMessageType):
+            envelope.open_envelope(keys[1], ct, allowed_types=(MessageType.TEXT,))
+
+    def test_overhead_constant(self, keys):
+        for n in (0, 1, 999):
+            assert len(_raw(envelope.seal(keys[0], "a" * n).ciphertext)) - n \
+                == envelope.OVERHEAD == 75
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -450,3 +522,48 @@ class TestManagerReplayProtection:
         (tmp_path / "seen_messages.json").write_text("garbage")
         with pytest.raises(ReplayStoreError):
             EncryptionManager(data_dir=str(tmp_path))
+
+
+class TestManagerContentTypes:
+
+    def test_decrypt_accepts_only_text(self, pair):
+        alice, bob = pair
+        ct = alice.encrypt("Bob", "{}", type=MessageType.FILE_DESCRIPTOR)
+        with pytest.raises(UnexpectedMessageType):
+            bob.decrypt("Alice", ct)
+        # refused before recording: the same envelope is still receivable
+        msg = bob.decrypt_message("Alice", ct)
+        assert msg.type is MessageType.FILE_DESCRIPTOR
+
+    def test_decrypt_message_types_filter(self, pair):
+        alice, bob = pair
+        ct = alice.encrypt("Bob", "x", type=200)
+        with pytest.raises(UnexpectedMessageType):
+            bob.decrypt_message("Alice", ct, types=(MessageType.TEXT,))
+        assert bob.decrypt_message("Alice", ct, types=(200,)).type == 200
+
+    def test_package_is_not_a_message(self, pair):
+        alice, bob = pair
+        ct = alice.encrypt("Bob", "pkg", type=MessageType.FILE_PACKAGE)
+        with pytest.raises(UnexpectedMessageType):
+            bob.decrypt_message("Alice", ct)
+        with pytest.raises(UnexpectedMessageType):
+            bob.decrypt_message("Alice", ct, types=(MessageType.FILE_PACKAGE,))
+        assert len(bob.replay_store) == 0
+
+    def test_open_package_has_no_replay_or_window(self, pair, clock):
+        alice, bob = pair
+        ct = alice.encrypt("Bob", "pkg", type=MessageType.FILE_PACKAGE)
+        assert bob.open_package("Alice", ct) == "pkg"
+        clock.t = NOW + 365 * DAY
+        assert bob.open_package("Alice", ct) == "pkg"
+        assert len(bob.replay_store) == 0
+
+    def test_open_package_refuses_messages(self, pair):
+        alice, bob = pair
+        with pytest.raises(UnexpectedMessageType):
+            bob.open_package("Alice", alice.encrypt("Bob", "text"))
+
+    def test_encrypt_message_reports_type(self, pair):
+        alice, _ = pair
+        assert alice.encrypt_message("Bob", "x", type=130).type == 130

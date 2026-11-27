@@ -1,32 +1,54 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Versioned message envelope (format v1).
+"""Versioned message envelope (format v2).
 
 Until 0.4.0 a message was a bare NaCl ``Box`` ciphertext in base64: no version,
 no message ID and no timestamp, so a receiver could neither evolve the format
-nor tell a replayed message from a new one. Starting with 0.5.0 every message
-is wrapped in the envelope below. Bare 0.4.0-style ciphertexts are rejected.
+nor tell a replayed message from a new one. 0.5.0 introduced envelope v1;
+0.6.0 replaces it with v2, which adds a content type. Only v2 is accepted:
+bare 0.4.0 ciphertexts and v1 envelopes (0.5.0, never shipped in a client
+release) are rejected.
 
 Wire format (the whole thing is standard base64 for transport)::
 
     offset  len  field
-    0       4    magic   = b"HBM1"
-    4       1    version = 1
+    0       4    magic   = b"HBM1"   (format family; the version byte follows)
+    4       1    version = 2
     5       ..   Box(nonce || ciphertext)   X25519 + XSalsa20-Poly1305
 
 Plaintext inside the ``Box``::
 
     offset  len  field
     0       5    copy of the outer header (magic + version)
-    5       16   message ID (random, os.urandom)
-    21      8    sender timestamp, milliseconds since the Unix epoch
+    5       1    content type (:class:`MessageType`)
+    6       16   message ID (random, os.urandom)
+    22      8    sender timestamp, milliseconds since the Unix epoch
                  (uint64 big-endian)
-    29      ..   message body, UTF-8
+    30      ..   body, UTF-8
+
+The content type tells the receiver what the body is before it interprets it,
+so new kinds of messages (read receipts, group headers, key rotation notices)
+need no guessing from the body, and an older client can reject a type it does
+not know instead of showing it as text. It sits inside the ciphertext: the
+relay must not learn which deliveries are, say, read receipts.
+
+Values 1–127 are defined by hushbox-core (every client must handle or reject
+them); 128–255 are free for application-specific content and opaque to the
+core; 0 is invalid. Only core-defined types listed in :class:`MessageType`
+and application types are accepted when opening; any other value raises
+:class:`~hushbox_core.errors.UnsupportedMessageType`.
+
+File packages (:attr:`MessageType.FILE_PACKAGE`) are stored objects rather
+than messages: they are opened with :func:`open_envelope` but are not subject
+to the replay register or the receive window, and the message path of
+:class:`~hushbox_core.EncryptionManager` refuses them. The type binds that
+distinction cryptographically, so a package cannot be passed off as a message
+(and replayed without limits) or the other way round.
 
 Why the header is repeated inside: NaCl ``Box`` has no associated data, so the
 outer header is not authenticated by Poly1305. Repeating it inside the
 ciphertext and comparing after decryption binds the version to the
-authenticated content: a future v2 parser cannot be fed a v1 payload under a
-v2 header (or the other way round) without detection.
+authenticated content: a parser for one version cannot be fed a payload
+sealed under another version without detection.
 
 The message ID and the timestamp are inside the ciphertext, so the relay sees
 neither. Only the 5-byte header is visible, which tells an observer that the
@@ -48,8 +70,9 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import IntEnum
 from pathlib import Path
-from typing import Callable, Protocol, runtime_checkable
+from typing import Callable, Collection, Protocol, runtime_checkable
 
 from nacl.exceptions import CryptoError
 from nacl.public import Box
@@ -62,14 +85,19 @@ from .errors import (
     ReplayedMessage,
     ReplayStoreError,
     UnsupportedMessageFormat,
+    UnexpectedMessageType,
+    UnsupportedMessageType,
 )
 
 MAGIC = b"HBM1"
-VERSION = 1
+VERSION = 2
 _HEADER = struct.Struct(">4sB")                 # magic, version
 HEADER = _HEADER.pack(MAGIC, VERSION)
 MESSAGE_ID_SIZE = 16
-_INNER = struct.Struct(f">{_HEADER.size}s{MESSAGE_ID_SIZE}sQ")
+_INNER = struct.Struct(f">{_HEADER.size}sB{MESSAGE_ID_SIZE}sQ")
+# Bytes the envelope adds around the body: outer header, nonce, Poly1305 tag
+# and the inner header (header copy, type, message ID, timestamp).
+OVERHEAD = _HEADER.size + Box.NONCE_SIZE + 16 + _INNER.size
 _MIN_BOX_SIZE = Box.NONCE_SIZE + 16             # nonce + Poly1305 tag
 
 # Receive window. A message older than MAX_MESSAGE_AGE, or dated more than
@@ -78,7 +106,38 @@ _MIN_BOX_SIZE = Box.NONCE_SIZE + 16             # nonce + Poly1305 tag
 MAX_MESSAGE_AGE = 30 * 24 * 60 * 60.0           # seconds
 MAX_CLOCK_SKEW = 10 * 60.0                      # seconds
 
+APP_TYPE_MIN = 128                              # 128–255: application-specific
+
 Clock = Callable[[], float]
+
+
+class MessageType(IntEnum):
+    """Content types defined by hushbox-core (1–127)."""
+
+    TEXT = 1
+    """UTF-8 text meant to be shown to the user."""
+
+    FILE_DESCRIPTOR = 2
+    """Announces a stored file package; the body is an application-defined
+    reference (NULLGIS: JSON with an opaque ``object_ref``). A message."""
+
+    FILE_PACKAGE = 3
+    """An encrypted file package (``.hbx`` content, S3 object). A stored
+    object, not a message: no replay register, no receive window."""
+
+
+def _check_type(content_type: int) -> int:
+    """Validate a content type value; return it as int (or MessageType)."""
+    if not isinstance(content_type, int) or isinstance(content_type, bool):
+        raise UnsupportedMessageType("Typ treści musi być liczbą całkowitą.")
+    if content_type >= APP_TYPE_MIN and content_type <= 255:
+        return content_type
+    try:
+        return MessageType(content_type)
+    except ValueError:
+        raise UnsupportedMessageType(
+            f"Nieznany typ treści wiadomości ({content_type}). Zaktualizuj aplikację."
+        ) from None
 
 
 @dataclass(frozen=True)
@@ -89,15 +148,20 @@ class EncryptedMessage:
     ciphertext: str
     message_id: str          # 32 lowercase hex characters
     timestamp_ms: int
+    type: int = MessageType.TEXT
 
 
 @dataclass(frozen=True)
 class DecryptedMessage:
-    """A verified message: authentic, fresh and not seen before."""
+    """An authentic envelope. From the message path of
+    :class:`~hushbox_core.EncryptionManager` it is also fresh and not seen
+    before."""
 
     text: str
     message_id: str          # 32 lowercase hex characters
     timestamp_ms: int
+    type: int = MessageType.TEXT
+    """:class:`MessageType` for core types, plain ``int`` for 128–255."""
 
     @property
     def sent_at(self) -> datetime:
@@ -113,15 +177,20 @@ def seal(
     box: Box,
     text: str,
     *,
+    type: int = MessageType.TEXT,  # noqa: A002 - mirrors the wire field
     message_id: bytes | None = None,
     timestamp_ms: int | None = None,
     clock: Clock = time.time,
 ) -> EncryptedMessage:
-    """Encrypt ``text`` into a v1 envelope.
+    """Encrypt ``text`` into an envelope of the given content ``type``.
 
     ``message_id`` and ``timestamp_ms`` exist for tests and for re-sending the
     *same* logical message; normal callers leave them out.
+
+    :raises UnsupportedMessageType: ``type`` is 0, outside 0–255 or an
+        undefined core type.
     """
+    content_type = _check_type(type)
     if message_id is None:
         message_id = os.urandom(MESSAGE_ID_SIZE)
     if len(message_id) != MESSAGE_ID_SIZE:
@@ -131,12 +200,13 @@ def seal(
     if timestamp_ms < 0:
         raise ValueError("timestamp_ms must not be negative")
 
-    inner = _INNER.pack(HEADER, message_id, timestamp_ms) + text.encode("utf-8")
-    wire = HEADER + bytes(box.encrypt(inner))
+    inner = _INNER.pack(HEADER, content_type, message_id, timestamp_ms)
+    wire = HEADER + bytes(box.encrypt(inner + text.encode("utf-8")))
     return EncryptedMessage(
         ciphertext=base64.b64encode(wire).decode("ascii"),
         message_id=message_id.hex(),
         timestamp_ms=timestamp_ms,
+        type=content_type,
     )
 
 
@@ -157,12 +227,22 @@ def decode_wire(ciphertext: str) -> bytes:
         raise InvalidCiphertextFormat("Ciphertext nie jest poprawnym base64.") from exc
 
 
-def open_envelope(box: Box, ciphertext: str) -> DecryptedMessage:
-    """Decrypt and parse a v1 envelope. Does **not** check freshness or replay.
+def open_envelope(
+    box: Box,
+    ciphertext: str,
+    *,
+    allowed_types: Collection[int] | None = None,
+) -> DecryptedMessage:
+    """Decrypt and parse an envelope. Does **not** check freshness or replay.
 
+    :param allowed_types: if given, any other content type raises
+        :class:`~hushbox_core.errors.UnexpectedMessageType` (checked after
+        authentication, so it cannot be used to probe keys).
     :raises InvalidCiphertextFormat: not base64, no envelope header (for
         example a 0.4.0 ciphertext) or truncated.
-    :raises UnsupportedMessageFormat: envelope from a newer format version.
+    :raises UnsupportedMessageFormat: envelope of another format version.
+    :raises UnsupportedMessageType: content type this version does not know.
+    :raises UnexpectedMessageType: known type, but not one of ``allowed_types``.
     :raises DecryptionError: Poly1305 failure, wrong sender, header mismatch
         or a body that is not UTF-8.
     """
@@ -175,10 +255,15 @@ def open_envelope(box: Box, ciphertext: str) -> DecryptedMessage:
     if len(raw) < _HEADER.size:
         raise InvalidCiphertextFormat("Szyfrogram jest obcięty.")
     _, version = _HEADER.unpack(raw[: _HEADER.size])
-    if version != VERSION:
+    if version > VERSION:
         raise UnsupportedMessageFormat(
             f"Wiadomość w formacie {version}; ta wersja hushbox-core obsługuje "
             f"tylko format {VERSION}. Zaktualizuj aplikację."
+        )
+    if version != VERSION:
+        raise UnsupportedMessageFormat(
+            f"Wiadomość w starszym formacie {version}; ta wersja hushbox-core "
+            f"obsługuje tylko format {VERSION}. Nadawca musi zaktualizować aplikację."
         )
     if len(raw) < _HEADER.size + _MIN_BOX_SIZE:
         raise InvalidCiphertextFormat("Szyfrogram jest obcięty.")
@@ -193,10 +278,17 @@ def open_envelope(box: Box, ciphertext: str) -> DecryptedMessage:
 
     if len(inner) < _INNER.size:
         raise DecryptionError("Odszyfrowana koperta jest niekompletna.")
-    inner_header, message_id, timestamp_ms = _INNER.unpack(inner[: _INNER.size])
+    inner_header, content_type, message_id, timestamp_ms = _INNER.unpack(
+        inner[: _INNER.size]
+    )
     if not hmac.compare_digest(inner_header, raw[: _HEADER.size]):
         raise DecryptionError(
             "Nagłówek koperty nie zgadza się z zaszyfrowaną treścią."
+        )
+    content_type = _check_type(content_type)
+    if allowed_types is not None and content_type not in allowed_types:
+        raise UnexpectedMessageType(
+            f"Nieoczekiwany typ treści ({content_type}) w tym miejscu."
         )
     try:
         text = inner[_INNER.size :].decode("utf-8")
@@ -205,7 +297,7 @@ def open_envelope(box: Box, ciphertext: str) -> DecryptedMessage:
             "Odszyfrowana treść nie jest poprawnym tekstem UTF-8."
         ) from exc
     return DecryptedMessage(text=text, message_id=message_id.hex(),
-                            timestamp_ms=timestamp_ms)
+                            timestamp_ms=timestamp_ms, type=content_type)
 
 
 def check_freshness(
