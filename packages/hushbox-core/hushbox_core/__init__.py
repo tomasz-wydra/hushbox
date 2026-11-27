@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from . import envelope, keyfile, qr_payload, signing
+from . import envelope, keyfile, qr_payload, relay_auth, signing
 from .encryption_manager import (
     EncryptionManager,
     ContactInfo,
@@ -15,7 +15,12 @@ from .envelope import (
     ReplayStore,
 )
 from .qr_payload import ContactCard
-from .relay_transport import RelayTransport, pubkey_to_hash
+from .relay_auth import (
+    AuthenticatedRelayTransport,
+    RelaySession,
+    pubkey_to_hash,
+    send_message,
+)
 from .errors import (
     HushboxError,
     KeyStoreError,
@@ -33,6 +38,14 @@ from .errors import (
     MessageExpired,
     ReplayedMessage,
     ReplayStoreError,
+    RelayError,
+    RelayAuthError,
+    RelayPermissionError,
+    RelayInsecureTransportError,
+    RelayRateLimited,
+    RelayUnavailable,
+    RelayRequestStopped,
+    LocalDeliveryError,
     SignatureError,
     QrPayloadError,
     InvalidQrPayload,
@@ -42,8 +55,8 @@ from .errors import (
 __all__ = [
     "EncryptionManager", "ContactInfo",
     "fingerprint_for_pubkey", "normalize_fingerprint",
-    "RelayTransport", "pubkey_to_hash",
-    "keyfile", "envelope", "qr_payload", "signing", "ContactCard",
+    "AuthenticatedRelayTransport", "RelaySession", "send_message", "pubkey_to_hash",
+    "keyfile", "envelope", "qr_payload", "relay_auth", "signing", "ContactCard",
     "EncryptedMessage", "DecryptedMessage", "MessageType",
     "ReplayStore", "MemoryReplayStore", "JsonFileReplayStore",
     # wyjątki domenowe
@@ -55,6 +68,9 @@ __all__ = [
     "UnsupportedMessageFormat", "UnsupportedMessageType", "UnexpectedMessageType",
     "MessageExpired", "ReplayedMessage",
     "ReplayStoreError",
+    "RelayError", "RelayAuthError", "RelayPermissionError",
+    "RelayInsecureTransportError", "RelayRateLimited", "RelayUnavailable",
+    "RelayRequestStopped", "LocalDeliveryError",
     "SignatureError",
     "QrPayloadError", "InvalidQrPayload", "UnsupportedQrPayload",
 ]

@@ -3,7 +3,7 @@
 End-to-end encryption core library for Hushbox — NaCl (libsodium) keypair management,
 versioned private key file format, versioned message envelope with replay protection,
 versioned QR code payload, an Ed25519 signing key derived from the identity,
-contact verification (TOFU) and a relay transport client over HTTP.
+contact verification (TOFU) and a relay client with mailbox authentication.
 
 Storage of chat history and settings is left to the application. `ChatStore` and `AppSettings`,
 which wrote plaintext JSON, were removed in 0.4.0.
@@ -17,7 +17,7 @@ pip install -e .
 ## Usage
 
 ```python
-from hushbox_core import EncryptionManager, RelayTransport
+from hushbox_core import AuthenticatedRelayTransport, EncryptionManager
 
 # Generate or load your NaCl keypair
 mgr = EncryptionManager(data_dir="/path/to/data")
@@ -27,10 +27,46 @@ print(mgr.export_public_key())
 mgr.add_contact("Alice", alice_public_key_b64)
 ciphertext = mgr.encrypt("Alice", "Hello, Alice!")
 
-# Send via relay
-transport = RelayTransport(relay_url="https://relay.example.com", my_pubkey_b64=mgr.export_public_key())
-transport.send(alice_public_key_b64, ciphertext)
+# Send via relay (no session needed to send)
+relay = AuthenticatedRelayTransport(
+    "https://relay.example.com", mgr.export_public_key(), mgr.private_key)
+relay.send(alice_public_key_b64, ciphertext, sender_pubkey_b64=mgr.export_public_key())
 ```
+
+## Relay client
+
+`hushbox_core.relay_auth` implements the client side of the relay protocol,
+specified in [`docs/relay-auth.md`](../../docs/relay-auth.md): sending, mailbox
+authentication by challenge-response with the X25519 key (the token stays in
+memory only), long polling and acknowledgement.
+
+```python
+def on_delivery(relay_msg_id, from_hash, payload) -> bool:
+    store(relay_msg_id, from_hash, payload)   # durable first
+    return True                               # only then is the message ACKed
+
+relay = AuthenticatedRelayTransport(
+    "https://relay.example.com", mgr.export_public_key(), mgr.private_key,
+    last_message_id=last_stored_relay_id,      # your durable cursor
+    on_status=show_to_user,                    # persistent problems only
+)
+relay.on_delivery = on_delivery
+relay.start_polling()
+...
+relay.stop_polling()       # non-blocking; cancels a parked long poll, revokes the session
+```
+
+- Delivery is *durable before ACK*. A handler that returns `False` or raises
+  stops the batch, and the message stays on the relay.
+- The token is sent only over HTTPS. Plain HTTP is allowed for loopback hosts,
+  or for remote hosts with `allow_insecure_http=True`. Redirects are never
+  followed.
+- A 401 renews the session once, 403 backs off for a long time, 429 honours
+  `Retry-After`, and network errors back off exponentially with jitter.
+- `send_message()` sends without a transport object.
+
+The unauthenticated `RelayTransport` was removed in 0.8.0. Relays require a
+mailbox session for reading and acknowledging.
 
 ## Protecting the private key at rest
 
@@ -236,6 +272,10 @@ All exceptions derive from `HushboxError`:
 | `InvalidQrPayload` | scanned text is not a Hushbox QR code, or a field is malformed |
 | `UnsupportedQrPayload` | a Hushbox QR code of a newer version or an unsupported type |
 | `SignatureError` | a signing key or signature is malformed, or a signature does not verify |
+| `RelayAuthError` | mailbox authentication failed (bad challenge, redirect, rejected session); subclasses `RelayPermissionError` (403) and `RelayInsecureTransportError` (HTTP to a remote host) |
+| `RelayRateLimited` | the relay answered 429 (`retry_after` in seconds or `None`) |
+| `RelayUnavailable` | network error, timeout, 5xx or a send the relay did not accept |
+| `LocalDeliveryError` | the delivery handler failed; the message was not acknowledged |
 
 `decrypt()` raises `DecryptionError` rather than leaking `nacl.exceptions.CryptoError`,
 so callers can distinguish "this payload is not for me / was tampered with" from

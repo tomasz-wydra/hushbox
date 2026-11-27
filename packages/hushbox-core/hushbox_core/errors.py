@@ -96,6 +96,50 @@ class ReplayedMessage(DecryptionError):
     """This message (same sender and message ID) was already accepted."""
 
 
+# ── relay ─────────────────────────────────────────────────────────
+
+class RelayError(HushboxError):
+    """Common base for relay communication problems."""
+
+
+class RelayAuthError(RelayError):
+    """Authentication with the relay failed (bad or unknown challenge,
+    protocol mismatch, malformed response, redirect). Retrying later may
+    succeed."""
+
+
+class RelayPermissionError(RelayAuthError):
+    """The relay answered 403: a valid session lacks rights for the target.
+    Renewing the token will not help, so callers must not loop on it."""
+
+
+class RelayInsecureTransportError(RelayAuthError):
+    """Refusing to send credentials over plain HTTP to a remote host."""
+
+
+class RelayRateLimited(RelayError):
+    """The relay answered 429; ``retry_after`` is its Retry-After in seconds
+    (capped at one hour) or ``None``."""
+
+    def __init__(self, retry_after: float | None):
+        super().__init__("relay rate limit")
+        self.retry_after = retry_after
+
+
+class RelayUnavailable(RelayError):
+    """Network failure, timeout or 5xx from the relay."""
+
+
+class RelayRequestStopped(RelayError):
+    """A relay request was cancelled because the transport is shutting down.
+    Not a failure."""
+
+
+class LocalDeliveryError(RelayError):
+    """The delivery handler could not make a message durable; it is not
+    acknowledged and stays on the relay."""
+
+
 # ── signatures ────────────────────────────────────────────────────
 
 class SignatureError(HushboxError):

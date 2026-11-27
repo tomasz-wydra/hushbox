@@ -2,7 +2,7 @@
 
 Open-source end-to-end encryption core used by [NULLGIS](https://nullgis.com). NaCl/Curve25519 keys, no accounts. The relay that carries messages is blind to their content.
 
-This repository contains **`hushbox-core`**, the public, auditable part of the system: key management, the private key file format, the message envelope, contact verification and the relay transport client. Applications, the relay server and storage of chat history are not part of this repository.
+This repository contains **`hushbox-core`**, the public, auditable part of the system: key management, the private key file format, the message envelope, contact verification and the relay client with mailbox authentication. Applications, the relay server and storage of chat history are not part of this repository.
 
 ## Structure
 
@@ -16,7 +16,7 @@ hushbox/
         │   ├── envelope.py             # Versioned message envelope, replay protection
         │   ├── qr_payload.py           # Versioned QR code content (contact cards)
         │   ├── signing.py              # Ed25519 signing key derived from the identity
-        │   ├── relay_transport.py      # HTTP relay client (long polling)
+        │   ├── relay_auth.py           # Relay client: send, mailbox auth, long polling, ACK
         │   └── errors.py               # Domain exceptions
         └── tests/
 ```
@@ -30,6 +30,8 @@ hushbox/
 - No accounts, no phone numbers, no telemetry
 
 Known limitations and how to report a vulnerability: see [SECURITY.md](SECURITY.md).
+
+Protocol specifications are in [`docs/`](docs/): [relay protocol and mailbox authentication](docs/relay-auth.md).
 
 ## Development
 
