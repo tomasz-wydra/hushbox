@@ -42,7 +42,7 @@ Hushbox is maintained by a single person, so these are targets that leave room f
 In scope:
 
 - cryptography and key handling in `packages/hushbox-core` (encryption, key file format, fingerprints, contact key changes),
-- the relay transport client in `packages/hushbox-core`.
+- the relay transport client, the QR payload format and the Ed25519 signing key and signatures in `packages/hushbox-core`.
 
 Vulnerabilities in NULLGIS itself (desktop application or relay server) can be reported the same way.
 
@@ -65,4 +65,6 @@ These are documented design properties, not vulnerabilities. Reports that only r
 - **Replay protection is local and time-bounded.** Since 0.5.0 each message carries a random ID and a sender timestamp inside the ciphertext (since 0.6.0 also a content type). A receiver accepts a message once per sender and ID, and only if its timestamp is within the receive window (default: 30 days back, 10 minutes ahead). The register of seen IDs lives on each device: a second device, or a device whose data directory was wiped, can accept a replay of a message that is still inside the window. The timestamp is the sender's clock and is not verified by any third party. File packages (content type `FILE_PACKAGE`) are deliberately exempt: they can be opened any number of times and at any age. The content type keeps them apart from messages, so a package cannot be replayed as a message.
 - **No message ordering or loss detection.** The envelope has no sequence number, so a relay can drop or reorder messages without the receiver noticing.
 - **Trust on first use.** A contact's identity is only as strong as the out-of-band fingerprint check. `hushbox-core` tracks a `verified` flag per contact and refuses silent key changes, but it is up to the client to show unverified contacts clearly.
+- **QR codes are not authenticated.** A Hushbox QR code (`qr_payload`) is plain, unsigned JSON. Anyone who sees it learns the public key and relay address. Anyone who can replace a printed or displayed code can substitute their own key. The fingerprint comparison is what establishes identity.
+- **The signing key is derived from the encryption key.** The Ed25519 key is computed from the X25519 private key (one-way, domain-separated BLAKE2b). Whoever obtains the X25519 private key can also sign as that identity; the two keys cannot be rotated or revoked separately. Signing keys of other people are not yet distributed or verified by `hushbox-core`.
 - **Optional key passphrase.** The private key file is protected with Argon2id only if the user sets a passphrase; legacy unencrypted key files are still accepted.
