@@ -1,7 +1,8 @@
 # hushbox-core
 
 End-to-end encryption core library for Hushbox — NaCl (libsodium) keypair management,
-versioned private key file format, contact verification (TOFU) and a relay transport client over HTTP.
+versioned private key file format, versioned message envelope with replay protection,
+contact verification (TOFU) and a relay transport client over HTTP.
 
 Storage of chat history and settings is left to the application. `ChatStore` and `AppSettings`,
 which wrote plaintext JSON, were removed in 0.4.0.
@@ -81,6 +82,49 @@ any key change resets `verified` to `False`.
 > form. `fingerprint` is SHA-256 over the **raw key bytes** and is the value
 > shown to humans, stable regardless of base64 variant.
 
+## Message format and replay protection
+
+Since 0.5.0 every message is a versioned envelope (`hushbox_core.envelope`):
+
+```
+base64( "HBM1" | version=1 | Box(nonce || ciphertext) )
+Box plaintext: header copy (5 B) | message ID (16 random bytes) | timestamp ms (uint64 BE) | UTF-8 body
+```
+
+The message ID and timestamp are inside the ciphertext, so the relay sees neither.
+The header is repeated inside the ciphertext because NaCl `Box` has no associated
+data; comparing the two copies binds the version to the authenticated content.
+
+**Breaking change:** bare `Box` ciphertexts written by 0.4.0 and earlier are
+rejected with `InvalidCiphertextFormat`. All parties must upgrade together.
+
+`decrypt()` accepts a message once per sender and message ID, and only inside the
+receive window: not older than 30 days and not more than 10 minutes in the future
+(both configurable). Accepted IDs are kept in `seen_messages.json` next to the key
+and pruned once they fall out of the window.
+
+```python
+sent = mgr.encrypt_message("Alice", "Hello")      # .ciphertext, .message_id, .timestamp_ms
+msg = mgr.decrypt_message("Alice", ciphertext)    # .text, .message_id, .timestamp_ms, .sent_at
+mgr.decrypt("Alice", ciphertext)                  # second time: ReplayedMessage
+```
+
+Applications with their own database can pass any `ReplayStore` implementation:
+
+```python
+mgr = EncryptionManager(data_dir, replay_store=MyDbReplayStore(), max_message_age=7 * 86400)
+
+# check now, record only after the message is stored, so a crash in between
+# does not lose it (the relay delivers it again)
+msg = mgr.decrypt_message("Alice", ciphertext, record=False)
+store_message(msg)
+mgr.mark_seen("Alice", msg)
+```
+
+Replay protection is local to one device: a second device of the same person
+keeps its own register, and wiping the data directory resets it (messages older
+than the window are still rejected).
+
 ## Errors
 
 All exceptions derive from `HushboxError`:
@@ -92,8 +136,12 @@ All exceptions derive from `HushboxError`:
 | `UnsupportedKeyFormat` | the key file header is not a format this version understands |
 | `KeyConflictError` | a contact already exists with a different public key |
 | `FingerprintMismatch` | `verify_contact` received a fingerprint that does not match |
-| `InvalidCiphertextFormat` | the ciphertext is not valid base64 |
-| `DecryptionError` | decryption or authentication failed (parent of the above) |
+| `InvalidCiphertextFormat` | the ciphertext is not valid base64, has no envelope header (pre-0.5.0 message) or is truncated |
+| `UnsupportedMessageFormat` | the envelope comes from a newer format version |
+| `MessageExpired` | the message timestamp is outside the receive window |
+| `ReplayedMessage` | the same message (sender + message ID) was already accepted |
+| `DecryptionError` | decryption or authentication failed (parent of the five above) |
+| `ReplayStoreError` | the register of received messages cannot be read (corrupted file) |
 
 `decrypt()` raises `DecryptionError` rather than leaking `nacl.exceptions.CryptoError`,
 so callers can distinguish "this payload is not for me / was tampered with" from

@@ -30,28 +30,40 @@ DWA RÓŻNE SKRÓTY KLUCZA PUBLICZNEGO — nie mieszać:
 Ochrona klucza prywatnego: patrz :mod:`hushbox_core.keyfile`. Hasło jest
 opcjonalne — pliki legacy (surowe 32 bajty) są nadal wczytywane, żeby nie
 zepsuć istniejących instalacji.
+
+Message format: every message is a versioned envelope with a message ID and a
+sender timestamp inside the ciphertext (see :mod:`hushbox_core.envelope`).
+``decrypt`` accepts a message once per sender and message ID, within the
+receive window; seen IDs are kept in ``seen_messages.json`` next to the key
+unless another :class:`~hushbox_core.envelope.ReplayStore` is passed in.
 """
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import hmac
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from nacl.encoding import Base64Encoder
-from nacl.exceptions import CryptoError
 from nacl.public import Box, PrivateKey, PublicKey
 
-from . import keyfile
+from . import envelope, keyfile
+from .envelope import (
+    MAX_CLOCK_SKEW,
+    MAX_MESSAGE_AGE,
+    Clock,
+    DecryptedMessage,
+    EncryptedMessage,
+    JsonFileReplayStore,
+    ReplayStore,
+)
 from .errors import (
-    DecryptionError,
     FingerprintMismatch,
-    InvalidCiphertextFormat,
     KeyConflictError,
+    ReplayedMessage,
 )
 
 # Ile znaków hex w grupie przy formatowaniu fingerprinta dla człowieka.
@@ -139,7 +151,12 @@ class ContactInfo:
 
 class EncryptionManager:
     def __init__(self, data_dir: str | os.PathLike[str] = ".",
-                 passphrase: str | None = None):
+                 passphrase: str | None = None,
+                 *,
+                 replay_store: ReplayStore | None = None,
+                 max_message_age: float = MAX_MESSAGE_AGE,
+                 max_clock_skew: float = MAX_CLOCK_SKEW,
+                 clock: Clock = time.time):
         """
         :param data_dir: katalog na klucz prywatny i kontakty.
         :param passphrase: hasło do klucza prywatnego. Wymagane tylko wtedy, gdy
@@ -147,12 +164,29 @@ class EncryptionManager:
             :func:`hushbox_core.keyfile.path_is_encrypted`. Jeśli podane przy
             pierwszym uruchomieniu, nowo wygenerowany klucz zostanie od razu
             zapisany w formie zaszyfrowanej.
+        :param replay_store: register of accepted message IDs. Defaults to
+            :class:`~hushbox_core.envelope.JsonFileReplayStore` in
+            ``data_dir/seen_messages.json``.
+        :param max_message_age: reject messages older than this (seconds).
+        :param max_clock_skew: reject messages dated further than this in the
+            future (seconds).
+        :param clock: time source in seconds since the epoch (for tests).
         """
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self.private_key_path  = self.data_dir / "my_private_key.bin"
         self.contact_keys_path = self.data_dir / "contact_keys.json"
+
+        if max_message_age <= 0 or max_clock_skew < 0:
+            raise ValueError("max_message_age must be > 0 and max_clock_skew >= 0")
+        self.max_message_age = max_message_age
+        self.max_clock_skew = max_clock_skew
+        self._clock = clock
+        self.replay_store: ReplayStore = (
+            replay_store if replay_store is not None
+            else JsonFileReplayStore(self.data_dir / "seen_messages.json")
+        )
 
         self.private_key = self._load_or_generate_private_key(passphrase)
         self.public_key  = self.private_key.public_key
@@ -372,53 +406,71 @@ class EncryptionManager:
         return Box(self.private_key, recipient_key)
 
     def encrypt(self, contact_name: str, plaintext: str) -> str:
+        """Encrypt a message for a contact; returns the base64 envelope."""
+        return self.encrypt_message(contact_name, plaintext).ciphertext
+
+    def encrypt_message(self, contact_name: str, plaintext: str) -> EncryptedMessage:
+        """Like :meth:`encrypt`, but also returns the message ID and timestamp."""
         box = self._get_box(contact_name)
-        encrypted = box.encrypt(plaintext.encode("utf-8"), encoder=Base64Encoder)
-        return encrypted.decode()
-
-    @staticmethod
-    def _decode_ciphertext(ciphertext: str) -> bytes:
-        """Znormalizuj i zdekoduj base64 ciphertext.
-
-        Tryb manualny (kopiuj-wklej przez e-mail/komunikator) regularnie dokłada
-        białe znaki — również *wewnątrz* stringa, gdy klient pocztowy zawinie
-        linie. Dlatego usuwamy wszystkie białe znaki, a nie tylko brzegowe, a
-        następnie walidujemy base64 rygorystycznie (``validate=True``).
-
-        Normalizacja jest bezpieczna: białe znaki nie należą do alfabetu base64,
-        więc ich usunięcie nie może zmienić odkodowanej treści, a jakakolwiek
-        realna korupcja transmisji zostanie i tak wyłapana przez Poly1305.
-        """
-        compact = "".join(ciphertext.split())
-        if not compact:
-            raise InvalidCiphertextFormat("Ciphertext jest pusty.")
-        try:
-            return base64.b64decode(compact, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise InvalidCiphertextFormat(
-                "Ciphertext nie jest poprawnym base64."
-            ) from exc
+        return envelope.seal(box, plaintext, clock=self._clock)
 
     def decrypt(self, contact_name: str, ciphertext: str) -> str:
-        """Odszyfruj wiadomość od kontaktu.
+        """Odszyfruj wiadomość od kontaktu i zapamiętaj ją jako odebraną.
 
         :raises KeyError: nieznany kontakt (błąd programisty, nie danych).
-        :raises DecryptionError: niepoprawny base64, zmanipulowany szyfrogram,
-            wiadomość od innego nadawcy albo nie-UTF-8 plaintext. Warstwa UI
-            powinna łapać wyłącznie ten typ i pokazać komunikat użytkownikowi.
+        :raises DecryptionError: niepoprawny base64 lub brak nagłówka koperty
+            (``InvalidCiphertextFormat``), nowszy format
+            (``UnsupportedMessageFormat``), zmanipulowany szyfrogram lub inny
+            nadawca, wiadomość spoza okna czasu (``MessageExpired``) albo już
+            odebrana (``ReplayedMessage``). Warstwa UI może łapać wyłącznie
+            ten typ bazowy.
+        """
+        return self.decrypt_message(contact_name, ciphertext).text
+
+    def decrypt_message(self, contact_name: str, ciphertext: str,
+                        *, record: bool = True) -> DecryptedMessage:
+        """Decrypt, check freshness and replay; return the message with its
+        ID and timestamp.
+
+        :param record: with ``True`` (default) the message is recorded in the
+            replay store before it is returned, atomically with the replay
+            check. With ``False`` it is only checked; the caller must call
+            :meth:`mark_seen` once the message is safely stored, so a failure
+            in between does not lose it (the relay delivers it again). The
+            caller is then responsible for not processing the same message
+            twice concurrently.
+        :raises DecryptionError: see :meth:`decrypt`.
         """
         box = self._get_box(contact_name)
-        raw = self._decode_ciphertext(ciphertext)
-        try:
-            decrypted = box.decrypt(raw)
-        except CryptoError as exc:
-            raise DecryptionError(
-                "Nie udało się odszyfrować wiadomości — szyfrogram został "
-                "zmieniony albo nie pochodzi od tego kontaktu."
-            ) from exc
-        try:
-            return decrypted.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise DecryptionError(
-                "Odszyfrowana treść nie jest poprawnym tekstem UTF-8."
-            ) from exc
+        sender = self.contacts[contact_name].pubkey_hash
+        message = envelope.open_envelope(box, ciphertext)
+
+        now = self._clock()
+        envelope.check_freshness(
+            message.timestamp_ms, now=now,
+            max_age=self.max_message_age, max_skew=self.max_clock_skew,
+        )
+        if record:
+            self.replay_store.prune(int((now - self.max_message_age) * 1000))
+            if not self.replay_store.add(sender, message.message_id,
+                                         message.timestamp_ms):
+                raise self._replayed()
+        elif self.replay_store.contains(sender, message.message_id):
+            raise self._replayed()
+        return message
+
+    def mark_seen(self, contact_name: str, message: DecryptedMessage) -> None:
+        """Record a message obtained with ``decrypt_message(record=False)``.
+
+        :raises ReplayedMessage: the message was recorded in the meantime.
+        """
+        sender = self.get_contact(contact_name).pubkey_hash
+        if not self.replay_store.add(sender, message.message_id,
+                                     message.timestamp_ms):
+            raise self._replayed()
+
+    @staticmethod
+    def _replayed() -> ReplayedMessage:
+        return ReplayedMessage(
+            "Ta wiadomość została już odebrana — odrzucono powtórzenie."
+        )
