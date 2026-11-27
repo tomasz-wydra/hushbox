@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hushbox-core"
 version = "0.7.0"
-description = "E2E encryption core for Hushbox — NaCl keys, key file format, message envelope, QR payload, relay transport"
+description = "E2E encryption core for Hushbox — NaCl keys, key file format, message envelope, QR payload, Ed25519 signatures, relay transport"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.12"
 dependencies = [

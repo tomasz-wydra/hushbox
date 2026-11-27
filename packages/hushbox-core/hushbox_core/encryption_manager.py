@@ -53,7 +53,7 @@ from typing import Collection
 from nacl.encoding import Base64Encoder
 from nacl.public import Box, PrivateKey, PublicKey
 
-from . import envelope, keyfile
+from . import envelope, keyfile, signing
 from .envelope import (
     MAX_CLOCK_SKEW,
     MAX_MESSAGE_AGE,
@@ -195,6 +195,8 @@ class EncryptionManager:
 
         self.private_key = self._load_or_generate_private_key(passphrase)
         self.public_key  = self.private_key.public_key
+        # Ed25519 key derived from the X25519 key (hushbox_core.signing).
+        self.signing_key = signing.derive_signing_key(self.private_key)
         self.contacts: dict[str, ContactInfo] = self._load_contacts()
 
         # zachowana kompatybilność wsteczna — słownik name→public_key_b64
@@ -244,6 +246,15 @@ class EncryptionManager:
 
     def export_public_key(self) -> str:
         return self.public_key.encode(encoder=Base64Encoder).decode()
+
+    def export_signing_public_key(self) -> str:
+        """Base64 of the Ed25519 public key derived from this identity."""
+        return signing.encode_verify_key(self.signing_key.verify_key)
+
+    def sign(self, context: str, message: bytes) -> bytes:
+        """Detached Ed25519 signature bound to ``context``
+        (see :mod:`hushbox_core.signing`)."""
+        return signing.sign(self.signing_key, context, message)
 
     def my_pubkey_hash(self) -> str:
         """SHA-256 własnego klucza publicznego (base64) — ID skrzynki relay."""

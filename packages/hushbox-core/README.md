@@ -2,7 +2,8 @@
 
 End-to-end encryption core library for Hushbox — NaCl (libsodium) keypair management,
 versioned private key file format, versioned message envelope with replay protection,
-versioned QR code payload, contact verification (TOFU) and a relay transport client over HTTP.
+versioned QR code payload, an Ed25519 signing key derived from the identity,
+contact verification (TOFU) and a relay transport client over HTTP.
 
 Storage of chat history and settings is left to the application. `ChatStore` and `AppSettings`,
 which wrote plaintext JSON, were removed in 0.4.0.
@@ -159,6 +160,33 @@ Replay protection is local to one device: a second device of the same person
 keeps its own register, and wiping the data directory resets it (messages older
 than the window are still rejected).
 
+## Signing key (Ed25519)
+
+Since 0.7.0 every identity also has an Ed25519 signing key (`hushbox_core.signing`).
+It is **derived** from the X25519 private key, so nothing new is stored and
+existing identities have one immediately:
+
+```
+seed = BLAKE2b-256(key = x25519_private_key, data = b"signing-key/v1", person = b"hushbox:ed25519:")
+```
+
+Any standard BLAKE2b implementation reproduces it (see the known-answer test).
+The derivation is one-way, and the two keys form one identity: they are
+rotated together.
+
+Signatures are detached and bound to a context, so a signature made for one
+purpose is never valid for another:
+
+```python
+sig = mgr.sign("org-cert", payload_bytes)                 # 64 bytes
+signing.verify(peer_signing_key_b64, "org-cert", payload_bytes, sig)  # raises SignatureError
+mgr.export_signing_public_key()                           # base64 Ed25519 public key
+```
+
+Signed bytes are `b"HBS1" | len(context) | context | message`. The context is
+1–64 characters of `a-z 0-9 . - _ :`. How contacts learn and trust each other's
+signing keys is not defined yet; it comes with organisation certificates.
+
 ## QR codes
 
 `hushbox_core.qr_payload` defines what a Hushbox QR code contains: compact JSON
@@ -207,6 +235,7 @@ All exceptions derive from `HushboxError`:
 | `ReplayStoreError` | the register of received messages cannot be read (corrupted file) |
 | `InvalidQrPayload` | scanned text is not a Hushbox QR code, or a field is malformed |
 | `UnsupportedQrPayload` | a Hushbox QR code of a newer version or an unsupported type |
+| `SignatureError` | a signing key or signature is malformed, or a signature does not verify |
 
 `decrypt()` raises `DecryptionError` rather than leaking `nacl.exceptions.CryptoError`,
 so callers can distinguish "this payload is not for me / was tampered with" from

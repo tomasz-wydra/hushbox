@@ -96,6 +96,12 @@ class ReplayedMessage(DecryptionError):
     """This message (same sender and message ID) was already accepted."""
 
 
+# ── signatures ────────────────────────────────────────────────────
+
+class SignatureError(HushboxError):
+    """A signature or signing key is invalid or does not verify."""
+
+
 # ── QR codes ──────────────────────────────────────────────────────
 
 class QrPayloadError(HushboxError):

@@ -42,7 +42,7 @@ Hushbox is maintained by a single person, so these are targets that leave room f
 In scope:
 
 - cryptography and key handling in `packages/hushbox-core` (encryption, key file format, fingerprints, contact key changes),
-- the relay transport client and the QR payload format in `packages/hushbox-core`.
+- the relay transport client, the QR payload format and the Ed25519 signing key and signatures in `packages/hushbox-core`.
 
 Vulnerabilities in NULLGIS itself (desktop application or relay server) can be reported the same way.
 
@@ -66,4 +66,5 @@ These are documented design properties, not vulnerabilities. Reports that only r
 - **No message ordering or loss detection.** The envelope has no sequence number, so a relay can drop or reorder messages without the receiver noticing.
 - **Trust on first use.** A contact's identity is only as strong as the out-of-band fingerprint check. `hushbox-core` tracks a `verified` flag per contact and refuses silent key changes, but it is up to the client to show unverified contacts clearly.
 - **QR codes are not authenticated.** A Hushbox QR code (`qr_payload`) is plain, unsigned JSON. Anyone who sees it learns the public key and relay address. Anyone who can replace a printed or displayed code can substitute their own key. The fingerprint comparison is what establishes identity.
+- **The signing key is derived from the encryption key.** The Ed25519 key is computed from the X25519 private key (one-way, domain-separated BLAKE2b). Whoever obtains the X25519 private key can also sign as that identity; the two keys cannot be rotated or revoked separately. Signing keys of other people are not yet distributed or verified by `hushbox-core`.
 - **Optional key passphrase.** The private key file is protected with Argon2id only if the user sets a passphrase; legacy unencrypted key files are still accepted.

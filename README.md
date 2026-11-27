@@ -15,6 +15,7 @@ hushbox/
         │   ├── keyfile.py              # Versioned private key file (Argon2id + SecretBox)
         │   ├── envelope.py             # Versioned message envelope, replay protection
         │   ├── qr_payload.py           # Versioned QR code content (contact cards)
+        │   ├── signing.py              # Ed25519 signing key derived from the identity
         │   ├── relay_transport.py      # HTTP relay client (long polling)
         │   └── errors.py               # Domain exceptions
         └── tests/

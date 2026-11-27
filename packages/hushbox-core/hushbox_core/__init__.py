@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from . import envelope, keyfile, qr_payload
+from . import envelope, keyfile, qr_payload, signing
 from .encryption_manager import (
     EncryptionManager,
     ContactInfo,
@@ -33,6 +33,7 @@ from .errors import (
     MessageExpired,
     ReplayedMessage,
     ReplayStoreError,
+    SignatureError,
     QrPayloadError,
     InvalidQrPayload,
     UnsupportedQrPayload,
@@ -42,7 +43,7 @@ __all__ = [
     "EncryptionManager", "ContactInfo",
     "fingerprint_for_pubkey", "normalize_fingerprint",
     "RelayTransport", "pubkey_to_hash",
-    "keyfile", "envelope", "qr_payload", "ContactCard",
+    "keyfile", "envelope", "qr_payload", "signing", "ContactCard",
     "EncryptedMessage", "DecryptedMessage", "MessageType",
     "ReplayStore", "MemoryReplayStore", "JsonFileReplayStore",
     # wyjątki domenowe
@@ -54,5 +55,6 @@ __all__ = [
     "UnsupportedMessageFormat", "UnsupportedMessageType", "UnexpectedMessageType",
     "MessageExpired", "ReplayedMessage",
     "ReplayStoreError",
+    "SignatureError",
     "QrPayloadError", "InvalidQrPayload", "UnsupportedQrPayload",
 ]
