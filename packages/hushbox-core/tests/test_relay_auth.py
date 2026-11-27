@@ -569,6 +569,19 @@ class TestTransport:
         worker.join(5)
         assert not worker.is_alive()
 
+    def test_restart_after_stop_is_refused(self, key):
+        fake = FakeRelay(_pk(key))
+        t = _transport(key, fake)
+        t.on_delivery = lambda *a: True
+        t.start_polling()
+        t.stop_polling()
+        t._polling_thread.join(5)
+        with pytest.raises(RuntimeError, match="create a new one"):
+            t.start_polling()
+        with pytest.raises(RuntimeError):
+            t.run_poll_loop()
+        assert not t.is_polling
+
     def test_stop_polling_revokes_session(self, key):
         fake = FakeRelay(_pk(key))
         t = _transport(key, fake)
@@ -592,6 +605,33 @@ def _run_loop(t: AuthenticatedRelayTransport, seconds: float):
 
 
 class TestPollLoop:
+
+    def test_immediate_empty_answers_do_not_spin(self, key):
+        """A relay that answers polls at once (too many waiters, long poll off)."""
+        fake = FakeRelay(_pk(key))
+        t = _transport(key, fake)
+        t.on_delivery = lambda *a: True
+        _run_loop(t, 1.2)
+        assert len(fake.paths("/messages/", "GET")) <= 3
+
+    def test_handler_not_ready_does_not_spin(self, key):
+        fake = FakeRelay(_pk(key))
+        fake.inbox = [_msg(1)]
+        t = _transport(key, fake)
+        t.on_delivery = lambda *a: False
+        _run_loop(t, 1.2)
+        assert len(fake.paths("/messages/", "GET")) <= 3
+        assert len(fake.inbox) == 1
+
+    def test_full_batches_are_fetched_without_pause(self, key, monkeypatch):
+        monkeypatch.setattr(relay_auth, "MIN_POLL_INTERVAL", 30.0)
+        fake = FakeRelay(_pk(key))
+        fake.inbox = [_msg(i) for i in range(3)]
+        t = _transport(key, fake)
+        got = []
+        t.on_delivery = lambda i, f, p: got.append(i) or True
+        _run_loop(t, 0.5)
+        assert got == ["m0", "m1", "m2"]
 
     def test_403_waits_long(self, key, monkeypatch):
         monkeypatch.setattr(relay_auth, "PERMANENT_ERROR_DELAY", 30.0)

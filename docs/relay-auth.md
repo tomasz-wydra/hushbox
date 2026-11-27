@@ -4,7 +4,7 @@ This document specifies, from the client's point of view, how a Hushbox client t
 
 Server internals (storage, rate-limit values, deployment, proxies) are out of scope. The reference relay is not part of this repository.
 
-Status: protocol version 1, as implemented in `hushbox-core` 0.8.0. This is a project specification, not an audited standard. All primitives come from libsodium (NaCl).
+Status: protocol version 1, as implemented in `hushbox-core` 0.8.0 and later. This is a project specification, not an audited standard. All primitives come from libsodium (NaCl).
 
 The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
@@ -200,6 +200,7 @@ A failed acknowledgement is not fatal: the message is already stored, and on red
 | Answer | Client behaviour |
 |---|---|
 | network error, timeout, 5xx | retry with exponential backoff and jitter (reference: 1 s doubling up to 60 s, "equal jitter") |
+| poll answered at once with nothing stored (no messages, or none could be stored yet) | wait at least 1 s before the next poll. A relay answers immediately instead of holding the poll when too many clients wait on one mailbox, so polling again at once would spin. |
 | 429 | wait `Retry-After` seconds if present (capped at 3600), otherwise back off |
 | 401 on an authenticated request | renew the session once (5.4) |
 | 403 | stop retrying quickly; wait long (reference: 300 s) and tell the user |

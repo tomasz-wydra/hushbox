@@ -4,13 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hushbox-core"
-version = "0.8.0"
+version = "0.9.0"
 description = "E2E encryption core for Hushbox — NaCl keys, key file format, message envelope, QR payload, Ed25519 signatures, authenticated relay client"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.12"
 dependencies = [
-    "pynacl",
-    "httpx",
+    # Minimums verified by running the test suite on Python 3.12 and 3.13:
+    # httpx < 0.23.1 imports the "cgi" module removed in Python 3.13.
+    "pynacl>=1.5",
+    "httpx>=0.23.1",
 ]
 
 [project.optional-dependencies]
