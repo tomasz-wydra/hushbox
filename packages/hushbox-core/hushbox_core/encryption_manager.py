@@ -31,11 +31,13 @@ Ochrona klucza prywatnego: patrz :mod:`hushbox_core.keyfile`. Hasło jest
 opcjonalne — pliki legacy (surowe 32 bajty) są nadal wczytywane, żeby nie
 zepsuć istniejących instalacji.
 
-Message format: every message is a versioned envelope with a message ID and a
-sender timestamp inside the ciphertext (see :mod:`hushbox_core.envelope`).
-``decrypt`` accepts a message once per sender and message ID, within the
-receive window; seen IDs are kept in ``seen_messages.json`` next to the key
-unless another :class:`~hushbox_core.envelope.ReplayStore` is passed in.
+Message format: every message is a versioned envelope with a content type, a
+message ID and a sender timestamp inside the ciphertext (see
+:mod:`hushbox_core.envelope`). ``decrypt``/``decrypt_message`` accept a
+message once per sender and message ID, within the receive window; seen IDs
+are kept in ``seen_messages.json`` next to the key unless another
+:class:`~hushbox_core.envelope.ReplayStore` is passed in. File packages go
+through :meth:`EncryptionManager.open_package` instead, without those checks.
 """
 from __future__ import annotations
 
@@ -46,6 +48,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Collection
 
 from nacl.encoding import Base64Encoder
 from nacl.public import Box, PrivateKey, PublicKey
@@ -57,6 +60,7 @@ from .envelope import (
     Clock,
     DecryptedMessage,
     EncryptedMessage,
+    MessageType,
     JsonFileReplayStore,
     ReplayStore,
 )
@@ -64,6 +68,7 @@ from .errors import (
     FingerprintMismatch,
     KeyConflictError,
     ReplayedMessage,
+    UnexpectedMessageType,
 )
 
 # Ile znaków hex w grupie przy formatowaniu fingerprinta dla człowieka.
@@ -405,17 +410,42 @@ class EncryptionManager:
         )
         return Box(self.private_key, recipient_key)
 
-    def encrypt(self, contact_name: str, plaintext: str) -> str:
-        """Encrypt a message for a contact; returns the base64 envelope."""
-        return self.encrypt_message(contact_name, plaintext).ciphertext
+    def encrypt(self, contact_name: str, plaintext: str,
+                *, type: int = MessageType.TEXT) -> str:  # noqa: A002
+        """Encrypt for a contact; returns the base64 envelope.
 
-    def encrypt_message(self, contact_name: str, plaintext: str) -> EncryptedMessage:
+        :param type: content type (:class:`~hushbox_core.envelope.MessageType`
+            or an application type 128–255). Defaults to text.
+        """
+        return self.encrypt_message(contact_name, plaintext, type=type).ciphertext
+
+    def encrypt_message(self, contact_name: str, plaintext: str,
+                        *, type: int = MessageType.TEXT) -> EncryptedMessage:  # noqa: A002
         """Like :meth:`encrypt`, but also returns the message ID and timestamp."""
         box = self._get_box(contact_name)
-        return envelope.seal(box, plaintext, clock=self._clock)
+        return envelope.seal(box, plaintext, type=type, clock=self._clock)
+
+    def open_package(self, contact_name: str, ciphertext: str) -> str:
+        """Open a file package (:attr:`MessageType.FILE_PACKAGE`).
+
+        A package is a stored object, not a message: it may be opened any
+        number of times and at any age, so neither the replay register nor
+        the receive window applies. Any other content type is refused.
+
+        :raises UnexpectedMessageType: the envelope is not a file package.
+        :raises DecryptionError: see :meth:`decrypt`.
+        """
+        box = self._get_box(contact_name)
+        return envelope.open_envelope(
+            box, ciphertext, allowed_types=(MessageType.FILE_PACKAGE,)
+        ).text
 
     def decrypt(self, contact_name: str, ciphertext: str) -> str:
-        """Odszyfruj wiadomość od kontaktu i zapamiętaj ją jako odebraną.
+        """Odszyfruj wiadomość tekstową od kontaktu i zapamiętaj ją jako odebraną.
+
+        Accepts only :attr:`MessageType.TEXT`; other types raise
+        ``UnexpectedMessageType``. Use :meth:`decrypt_message` to receive other
+        message types and :meth:`open_package` for file packages.
 
         :raises KeyError: nieznany kontakt (błąd programisty, nie danych).
         :raises DecryptionError: niepoprawny base64 lub brak nagłówka koperty
@@ -425,13 +455,20 @@ class EncryptionManager:
             odebrana (``ReplayedMessage``). Warstwa UI może łapać wyłącznie
             ten typ bazowy.
         """
-        return self.decrypt_message(contact_name, ciphertext).text
+        return self.decrypt_message(
+            contact_name, ciphertext, types=(MessageType.TEXT,)
+        ).text
 
     def decrypt_message(self, contact_name: str, ciphertext: str,
-                        *, record: bool = True) -> DecryptedMessage:
+                        *, record: bool = True,
+                        types: Collection[int] | None = None) -> DecryptedMessage:
         """Decrypt, check freshness and replay; return the message with its
-        ID and timestamp.
+        type, ID and timestamp.
 
+        :param types: accepted content types. ``None`` accepts every message
+            type; :attr:`MessageType.FILE_PACKAGE` is always refused here
+            (packages are not messages, see :meth:`open_package`). Rejected
+            types raise ``UnexpectedMessageType`` before anything is recorded.
         :param record: with ``True`` (default) the message is recorded in the
             replay store before it is returned, atomically with the replay
             check. With ``False`` it is only checked; the caller must call
@@ -443,7 +480,11 @@ class EncryptionManager:
         """
         box = self._get_box(contact_name)
         sender = self.contacts[contact_name].pubkey_hash
-        message = envelope.open_envelope(box, ciphertext)
+        message = envelope.open_envelope(box, ciphertext, allowed_types=types)
+        if message.type == MessageType.FILE_PACKAGE:
+            raise UnexpectedMessageType(
+                "Pakiet pliku nie jest wiadomością — otwórz go jako plik."
+            )
 
         now = self._clock()
         envelope.check_freshness(
