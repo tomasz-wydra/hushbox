@@ -556,6 +556,19 @@ class TestTransport:
         assert not t.is_polling
         assert t.wait_stopped(5)
 
+    def test_run_poll_loop_in_own_thread(self, key):
+        fake = FakeRelay(_pk(key))
+        fake.inbox = [_msg(1)]
+        t = _transport(key, fake)
+        got = threading.Event()
+        t.on_delivery = lambda *a: got.set() or True
+        worker = threading.Thread(target=t.run_poll_loop, daemon=True)
+        worker.start()
+        assert got.wait(5)
+        t.stop_polling()
+        worker.join(5)
+        assert not worker.is_alive()
+
     def test_stop_polling_revokes_session(self, key):
         fake = FakeRelay(_pk(key))
         t = _transport(key, fake)

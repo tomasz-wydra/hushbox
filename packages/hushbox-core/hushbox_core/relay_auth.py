@@ -547,12 +547,16 @@ class AuthenticatedRelayTransport:
 
     # ── lifecycle ────────────────────────────────────────────────
     def start_polling(self) -> None:
-        """Start long-polling in a background thread (idempotent)."""
+        """Start long-polling in a background thread (idempotent).
+
+        Applications that manage their own worker threads can call
+        :meth:`run_poll_loop` on one of them instead.
+        """
         if self._polling_thread and self._polling_thread.is_alive():
             return
         self._stop_event.clear()
         self._polling_thread = threading.Thread(
-            target=self._poll_loop, daemon=True, name="RelayPoller"
+            target=self.run_poll_loop, daemon=True, name="RelayPoller"
         )
         self._polling_thread.start()
         logger.info("Relay polling started (hash=%s…)", self.my_hash[:8])
@@ -595,6 +599,14 @@ class AuthenticatedRelayTransport:
                 logger.debug("on_status callback failed", exc_info=True)
 
     # ── polling ──────────────────────────────────────────────────
+    def run_poll_loop(self) -> None:
+        """Poll until :meth:`stop_polling`, in the calling thread (blocking).
+
+        For applications with their own thread pool; :meth:`start_polling`
+        runs the same loop on a dedicated thread.
+        """
+        self._poll_loop()
+
     def _poll_loop(self) -> None:
         failures = 0
         while not self._stop_event.is_set():
