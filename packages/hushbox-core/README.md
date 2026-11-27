@@ -2,7 +2,7 @@
 
 End-to-end encryption core library for Hushbox — NaCl (libsodium) keypair management,
 versioned private key file format, versioned message envelope with replay protection,
-contact verification (TOFU) and a relay transport client over HTTP.
+versioned QR code payload, contact verification (TOFU) and a relay transport client over HTTP.
 
 Storage of chat history and settings is left to the application. `ChatStore` and `AppSettings`,
 which wrote plaintext JSON, were removed in 0.4.0.
@@ -159,6 +159,33 @@ Replay protection is local to one device: a second device of the same person
 keeps its own register, and wiping the data directory resets it (messages older
 than the window are still rejected).
 
+## QR codes
+
+`hushbox_core.qr_payload` defines what a Hushbox QR code contains: compact JSON
+with a format version and a content type, so a scanner can tell a contact from a
+future invitation or message and refuse what it does not understand.
+
+```python
+from hushbox_core import qr_payload
+
+text = qr_payload.contact_payload(mgr.export_public_key(), "https://relay.example.com")
+# {"v":1,"type":"contact","public_key":"…","relay_url":"https://relay.example.com"}
+
+card = qr_payload.parse(scanned_text)   # ContactCard(public_key, relay_url)
+card.fingerprint                        # still compare out of band before trusting it
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `v` | yes | format version, only `1` |
+| `type` | yes | `"contact"`; `"invite"` and `"message"` are reserved and rejected for now |
+| `public_key` | for `contact` | canonical base64 of the 32-byte public key |
+| `relay_url` | no | `http(s)` relay of the contact, without credentials |
+
+Unknown fields are ignored, so optional fields can be added within v1. The
+payload is neither encrypted nor signed: a scanned key is as unverified as a
+typed one. The pre-0.7.0 payload `{"public_key": …}` is not accepted.
+
 ## Errors
 
 All exceptions derive from `HushboxError`:
@@ -178,6 +205,8 @@ All exceptions derive from `HushboxError`:
 | `ReplayedMessage` | the same message (sender + message ID) was already accepted |
 | `DecryptionError` | decryption or authentication failed (parent of the seven above) |
 | `ReplayStoreError` | the register of received messages cannot be read (corrupted file) |
+| `InvalidQrPayload` | scanned text is not a Hushbox QR code, or a field is malformed |
+| `UnsupportedQrPayload` | a Hushbox QR code of a newer version or an unsupported type |
 
 `decrypt()` raises `DecryptionError` rather than leaking `nacl.exceptions.CryptoError`,
 so callers can distinguish "this payload is not for me / was tampered with" from

@@ -96,6 +96,20 @@ class ReplayedMessage(DecryptionError):
     """This message (same sender and message ID) was already accepted."""
 
 
+# ── QR codes ──────────────────────────────────────────────────────
+
+class QrPayloadError(HushboxError):
+    """A scanned QR code cannot be used."""
+
+
+class InvalidQrPayload(QrPayloadError):
+    """Not a Hushbox QR code, or its fields are malformed."""
+
+
+class UnsupportedQrPayload(QrPayloadError):
+    """A Hushbox QR code of a newer version or an unsupported type."""
+
+
 # ── local state ───────────────────────────────────────────────────
 
 class ReplayStoreError(HushboxError):

@@ -14,6 +14,7 @@ hushbox/
         │   ├── encryption_manager.py   # NaCl keypairs, contacts, encrypt/decrypt, TOFU
         │   ├── keyfile.py              # Versioned private key file (Argon2id + SecretBox)
         │   ├── envelope.py             # Versioned message envelope, replay protection
+        │   ├── qr_payload.py           # Versioned QR code content (contact cards)
         │   ├── relay_transport.py      # HTTP relay client (long polling)
         │   └── errors.py               # Domain exceptions
         └── tests/
