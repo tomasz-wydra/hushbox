@@ -69,4 +69,24 @@ class DecryptionError(HushboxError):
 
 
 class InvalidCiphertextFormat(DecryptionError):
-    """Ciphertext nie jest poprawnym base64."""
+    """Ciphertext is not valid base64, has no envelope header (for example a
+    pre-0.5.0 message) or is truncated."""
+
+
+class UnsupportedMessageFormat(DecryptionError):
+    """The envelope comes from a newer, unsupported format version."""
+
+
+class MessageExpired(DecryptionError):
+    """The message timestamp is outside the receive window (too old, or too
+    far in the future)."""
+
+
+class ReplayedMessage(DecryptionError):
+    """This message (same sender and message ID) was already accepted."""
+
+
+# ── local state ───────────────────────────────────────────────────
+
+class ReplayStoreError(HushboxError):
+    """The local register of received messages cannot be read or written."""

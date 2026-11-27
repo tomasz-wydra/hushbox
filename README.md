@@ -2,7 +2,7 @@
 
 Open-source end-to-end encryption core used by [NULLGIS](https://nullgis.com). NaCl/Curve25519 keys, no accounts. The relay that carries messages is blind to their content.
 
-This repository contains **`hushbox-core`**, the public, auditable part of the system: key management, the private key file format, contact verification and the relay transport client. Applications, the relay server and storage of chat history are not part of this repository.
+This repository contains **`hushbox-core`**, the public, auditable part of the system: key management, the private key file format, the message envelope, contact verification and the relay transport client. Applications, the relay server and storage of chat history are not part of this repository.
 
 ## Structure
 
@@ -13,6 +13,7 @@ hushbox/
         ├── hushbox_core/
         │   ├── encryption_manager.py   # NaCl keypairs, contacts, encrypt/decrypt, TOFU
         │   ├── keyfile.py              # Versioned private key file (Argon2id + SecretBox)
+        │   ├── envelope.py             # Versioned message envelope, replay protection
         │   ├── relay_transport.py      # HTTP relay client (long polling)
         │   └── errors.py               # Domain exceptions
         └── tests/
@@ -21,6 +22,7 @@ hushbox/
 ## Security Model
 
 - **NaCl Box** (X25519 + XSalsa20-Poly1305) — authenticated E2E encryption
+- Versioned message envelope with message ID and timestamp inside the ciphertext; replayed messages are rejected locally
 - Private key never leaves the device; optional Argon2id passphrase protection at rest
 - Relay server sees only: SHA-256 key hashes + encrypted blobs
 - No accounts, no phone numbers, no telemetry
