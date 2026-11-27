@@ -567,3 +567,33 @@ class TestManagerContentTypes:
     def test_encrypt_message_reports_type(self, pair):
         alice, _ = pair
         assert alice.encrypt_message("Bob", "x", type=130).type == 130
+
+
+# ─────────────────────────────────────────────────────────────────
+# Audit fixes: clock-safe pruning
+# ─────────────────────────────────────────────────────────────────
+
+class TestClockSafePruning:
+
+    def test_cutoff_uses_the_earlier_clock(self):
+        assert envelope.prune_cutoff_ms(NOW + 20 * DAY, NOW_MS, 30 * DAY) == \
+            int((NOW - 30 * DAY) * 1000)
+        assert envelope.prune_cutoff_ms(NOW, NOW_MS + 5000, 30 * DAY) == \
+            int((NOW - 30 * DAY) * 1000)
+
+    def test_receiver_clock_ahead_does_not_open_a_replay_window(self, tmp_path):
+        """Receiver clock 20 days ahead, then corrected: old IDs must survive."""
+        sender_clock, receiver_clock = FakeClock(), FakeClock()
+        alice = EncryptionManager(str(tmp_path / "a"), clock=sender_clock)
+        bob = EncryptionManager(str(tmp_path / "b"), clock=receiver_clock)
+        alice.add_contact("Bob", bob.export_public_key())
+        bob.add_contact("Alice", alice.export_public_key())
+
+        old = alice.encrypt("Bob", "15 days old")
+        bob.decrypt("Alice", old)                   # accepted at NOW
+        sender_clock.t = receiver_clock.t = NOW + 15 * DAY
+        receiver_clock.t += 20 * DAY                # receiver clock runs ahead
+        bob.decrypt("Alice", alice.encrypt("Bob", "triggers prune"))
+        receiver_clock.t = NOW + 15 * DAY           # clock corrected
+        with pytest.raises(ReplayedMessage):
+            bob.decrypt("Alice", old)

@@ -528,3 +528,41 @@ class TestDecryptionErrors:
         cipher = alice.encrypt("Bob", plaintext)
         wrapped = "\n".join(cipher[i:i + 64] for i in range(0, len(cipher), 64))
         assert bob.decrypt("Alice", wrapped) == plaintext
+
+
+# ─────────────────────────────────────────────────────────────────
+# Audit fixes: contact file
+# ─────────────────────────────────────────────────────────────────
+
+class TestContactFile:
+
+    def test_failed_save_keeps_the_previous_file(self, manager, bob, alice, tmp_dir, monkeypatch):
+        manager.add_contact("Bob", bob.export_public_key())
+        path = Path(tmp_dir) / "contact_keys.json"
+        before = path.read_bytes()
+
+        def crash(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "replace", crash)
+        with pytest.raises(OSError):
+            manager.add_contact("Alice", alice.export_public_key())
+        assert path.read_bytes() == before
+        monkeypatch.undo()
+        assert EncryptionManager(data_dir=tmp_dir).list_contacts() == ["Bob"]
+
+    def test_legacy_telegram_fields_load_and_are_dropped(self, tmp_dir, bob):
+        import json
+        path = Path(tmp_dir) / "contact_keys.json"
+        path.write_text(json.dumps({"Bob": {
+            "public_key": bob.export_public_key(), "relay_url": "",
+            "telegram_bot_token": "123:secret", "telegram_chat_id": "42",
+        }}))
+        mgr = EncryptionManager(data_dir=tmp_dir)
+        assert mgr.has_contact("Bob")
+        mgr.update_relay("Bob", "https://relay.example")
+        assert "telegram" not in path.read_text()
+
+    def test_add_contact_has_no_telegram_parameters(self, manager, bob):
+        with pytest.raises(TypeError):
+            manager.add_contact("Bob", bob.export_public_key(), telegram_bot_token="x")

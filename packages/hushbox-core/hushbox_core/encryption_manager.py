@@ -109,10 +109,6 @@ class ContactInfo:
     # TOFU — czy użytkownik potwierdził fingerprint kanałem out-of-band.
     verified: bool = False
 
-    # Pola legacy Telegram — zachowane dla migracji ze starszych wersji
-    telegram_bot_token: str = ""
-    telegram_chat_id:   str = ""
-
     @property
     def pubkey_hash(self) -> str:
         """SHA-256 klucza publicznego (base64) — identyfikator w relay.
@@ -127,30 +123,24 @@ class ContactInfo:
         return fingerprint_for_pubkey(self.public_key)
 
     def to_dict(self) -> dict:
-        d = {
+        return {
             "public_key": self.public_key,
             "relay_url":  self.relay_url,
             "verified":   self.verified,
         }
-        # zachowaj pola Telegram jeśli niepuste (kompatybilność wsteczna)
-        if self.telegram_bot_token:
-            d["telegram_bot_token"] = self.telegram_bot_token
-        if self.telegram_chat_id:
-            d["telegram_chat_id"] = self.telegram_chat_id
-        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "ContactInfo":
         # obsługa starego formatu (plain string zamiast dict)
         if isinstance(d, str):
             return cls(public_key=d)
+        # Unknown keys (e.g. the removed Telegram fields) are ignored and
+        # dropped on the next save.
         return cls(
-            public_key=         d.get("public_key", ""),
-            relay_url=          d.get("relay_url",  ""),
+            public_key= d.get("public_key", ""),
+            relay_url=  d.get("relay_url",  ""),
             # Kontakty z wersji przed TOFU są traktowane jako NIEzweryfikowane.
-            verified=           bool(d.get("verified", False)),
-            telegram_bot_token= d.get("telegram_bot_token", ""),
-            telegram_chat_id=   d.get("telegram_chat_id",  ""),
+            verified=   bool(d.get("verified", False)),
         )
 
 
@@ -277,18 +267,19 @@ class EncryptionManager:
 
     def _save_contacts(self) -> None:
         data = {name: c.to_dict() for name, c in self.contacts.items()}
-        with open(self.contact_keys_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        # Atomic (temp file + replace): a crash or a full disk mid-write must
+        # not leave an empty or truncated contact list behind.
+        keyfile.write_atomic(
+            self.contact_keys_path,
+            json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
+        )
         # sync kompatybilny słownik
         self.contact_keys = {n: c.public_key for n, c in self.contacts.items()}
 
     def add_contact(self, name: str, public_key_b64: str,
                     relay_url: str = "",
                     *,
-                    allow_key_change: bool = False,
-                    # legacy Telegram params — ignorowane jeśli relay_url ustawiony
-                    telegram_bot_token: str = "",
-                    telegram_chat_id:   str = "") -> None:
+                    allow_key_change: bool = False) -> None:
         """Dodaj lub zaktualizuj kontakt.
 
         :param allow_key_change: jeśli kontakt o tej nazwie już istnieje z
@@ -318,11 +309,9 @@ class EncryptionManager:
         verified = False if (existing is None or key_changed) else existing.verified
 
         self.contacts[name] = ContactInfo(
-            public_key=         public_key_b64,
-            relay_url=          relay_url or (existing.relay_url if existing else ""),
-            verified=           verified,
-            telegram_bot_token= telegram_bot_token or (existing.telegram_bot_token if existing else ""),
-            telegram_chat_id=   telegram_chat_id   or (existing.telegram_chat_id   if existing else ""),
+            public_key= public_key_b64,
+            relay_url=  relay_url or (existing.relay_url if existing else ""),
+            verified=   verified,
         )
         self._save_contacts()
 
@@ -503,7 +492,9 @@ class EncryptionManager:
             max_age=self.max_message_age, max_skew=self.max_clock_skew,
         )
         if record:
-            self.replay_store.prune(int((now - self.max_message_age) * 1000))
+            self.replay_store.prune(
+                envelope.prune_cutoff_ms(now, message.timestamp_ms, self.max_message_age)
+            )
             if not self.replay_store.add(sender, message.message_id,
                                          message.timestamp_ms):
                 raise self._replayed()

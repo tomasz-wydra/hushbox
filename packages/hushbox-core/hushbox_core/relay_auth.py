@@ -83,6 +83,11 @@ MAX_CHALLENGE_LIFETIME = 600
 MAX_ENCRYPTED_CHALLENGE_LEN = 4096
 MAX_SESSION_LIFETIME = 24 * 3600
 
+# Minimum time between two polls that returned no messages. A relay answers
+# immediately (instead of holding the long poll) when too many clients wait on
+# one mailbox or long polling is disabled; without this the loop would spin.
+MIN_POLL_INTERVAL = 1.0
+
 # Poll-loop backoff.
 BACKOFF_BASE = 1.0
 BACKOFF_MAX = 60.0
@@ -328,6 +333,12 @@ class RelaySession:
 
     # ── token management ─────────────────────────────────────────
     @property
+    def closed(self) -> bool:
+        """True after :meth:`close` or :meth:`cancel_pending`; final."""
+        with self._lock:
+            return self._closed or self._http.stopping
+
+    @property
     def has_token(self) -> bool:
         with self._lock:
             return self._token is not None
@@ -547,13 +558,19 @@ class AuthenticatedRelayTransport:
 
     # ── lifecycle ────────────────────────────────────────────────
     def start_polling(self) -> None:
-        """Start long-polling in a background thread (idempotent).
+        """Start long-polling in a background thread (idempotent while running).
 
-        Applications that manage their own worker threads can call
+        A transport is single-use: after :meth:`stop_polling` or
+        :meth:`logout` its session is closed, so create a new transport to
+        poll again. Applications that manage their own worker threads can call
         :meth:`run_poll_loop` on one of them instead.
+
+        :raises RuntimeError: the transport was already stopped.
         """
         if self._polling_thread and self._polling_thread.is_alive():
             return
+        if self.session.closed:
+            raise RuntimeError("relay transport was stopped; create a new one to poll again")
         self._stop_event.clear()
         self._polling_thread = threading.Thread(
             target=self.run_poll_loop, daemon=True, name="RelayPoller"
@@ -604,16 +621,27 @@ class AuthenticatedRelayTransport:
 
         For applications with their own thread pool; :meth:`start_polling`
         runs the same loop on a dedicated thread.
+
+        :raises RuntimeError: the transport was already stopped.
         """
+        if self.session.closed:
+            raise RuntimeError("relay transport was stopped; create a new one to poll again")
         self._poll_loop()
 
     def _poll_loop(self) -> None:
         failures = 0
         while not self._stop_event.is_set():
+            started = time.monotonic()
             try:
-                self._fetch_messages()
+                handled = self._fetch_messages()
                 failures = 0
                 self._report("")
+                if not handled:
+                    # Nothing stored (empty answer, or the handler was not
+                    # ready) and it came back at once: don't spin.
+                    rest = MIN_POLL_INTERVAL - (time.monotonic() - started)
+                    if rest > 0:
+                        self._stop_event.wait(rest)
                 continue
             except RelayRequestStopped:
                 break  # deliberate shutdown, not a failure and no reason to retry
@@ -648,7 +676,8 @@ class AuthenticatedRelayTransport:
         cap = min(BACKOFF_MAX, BACKOFF_BASE * (2 ** min(failures, 10)))
         return random.uniform(cap / 2, cap)   # "equal jitter"
 
-    def _fetch_messages(self) -> None:
+    def _fetch_messages(self) -> int:
+        """One poll; returns how many messages were durably handled."""
         params: dict = {"timeout": LONG_POLL_TIMEOUT, "limit": POLL_LIMIT}
         if self._last_message_id:
             params["since"] = self._last_message_id
@@ -668,7 +697,8 @@ class AuthenticatedRelayTransport:
 
         handler = self.on_delivery
         if handler is None:
-            return
+            return 0
+        handled_count = 0
         for msg in messages:
             if self._stop_event.is_set():
                 break
@@ -692,11 +722,13 @@ class AuthenticatedRelayTransport:
                 raise LocalDeliveryError(type(exc).__name__) from exc
             if not handled:
                 break  # not durable: no ACK, no cursor move, retry later
+            handled_count += 1
             if self._stop_event.is_set():
                 break  # stored; a redelivery is deduplicated and acknowledged then
 
             self._ack(msg_id)
             self._last_message_id = msg_id
+        return handled_count
 
     def _ack(self, msg_id: str) -> bool:
         """DELETE the message (synchronously, after it was stored).

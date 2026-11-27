@@ -54,6 +54,7 @@ relay.on_delivery = on_delivery
 relay.start_polling()
 ...
 relay.stop_polling()       # non-blocking; cancels a parked long poll, revokes the session
+                           # (single use: create a new transport to poll again)
 ```
 
 - Delivery is *durable before ACK*. A handler that returns `False` or raises

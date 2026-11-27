@@ -327,6 +327,20 @@ def check_freshness(
         )
 
 
+def prune_cutoff_ms(now: float, accepted_timestamp_ms: int,
+                    max_age: float = MAX_MESSAGE_AGE) -> int:
+    """Oldest sender timestamp (ms) a replay register must still keep.
+
+    Counted from the *earlier* of the local clock and the timestamp of the
+    message being accepted. A receiver clock that runs ahead (say 20 days)
+    would otherwise prune IDs that are still inside the real window, and
+    once the clock is corrected those messages could be replayed. A message
+    that passed :func:`check_freshness` is at most ``MAX_CLOCK_SKEW`` ahead of
+    the local clock, so a sender clock cannot push the cutoff forward either.
+    """
+    return int((min(now, accepted_timestamp_ms / 1000) - max_age) * 1000)
+
+
 # ──────────────────────────────────────────────────────────────────
 # Replay store
 # ──────────────────────────────────────────────────────────────────
