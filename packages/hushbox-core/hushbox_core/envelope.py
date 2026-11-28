@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Versioned message envelope (format v2).
+"""Versioned message envelope (format v3).
 
 Until 0.4.0 a message was a bare NaCl ``Box`` ciphertext in base64: no version,
 no message ID and no timestamp, so a receiver could neither evolve the format
 nor tell a replayed message from a new one. 0.5.0 introduced envelope v1;
-0.6.0 replaces it with v2, which adds a content type. Only v2 is accepted:
-bare 0.4.0 ciphertexts and v1 envelopes (0.5.0, never shipped in a client
-release) are rejected.
+0.6.0 replaced it with v2, which added a content type; 0.10.0 replaces it with
+v3, which adds the sender's public key. Only v3 is accepted: bare 0.4.0
+ciphertexts and v1/v2 envelopes (never shipped in a client release) are
+rejected.
 
 Wire format (the whole thing is standard base64 for transport)::
 
     offset  len  field
     0       4    magic   = b"HBM1"   (format family; the version byte follows)
-    4       1    version = 2
+    4       1    version = 3
     5       ..   Box(nonce || ciphertext)   X25519 + XSalsa20-Poly1305
 
 Plaintext inside the ``Box``::
@@ -20,10 +21,21 @@ Plaintext inside the ``Box``::
     offset  len  field
     0       5    copy of the outer header (magic + version)
     5       1    content type (:class:`MessageType`)
-    6       16   message ID (random, os.urandom)
-    22      8    sender timestamp, milliseconds since the Unix epoch
+    6       32   sender's X25519 public key (raw bytes)
+    38      16   message ID (random, os.urandom)
+    54      8    sender timestamp, milliseconds since the Unix epoch
                  (uint64 big-endian)
-    30      ..   body, UTF-8
+    62      ..   body, UTF-8
+
+Why the sender's key is inside (new in v3): the shared key of a NaCl ``Box``
+is the same in both directions, ``Box(a_sk, b_pk) == Box(b_sk, a_pk)``, so
+Poly1305 proves only that *one of the two* parties sealed the envelope. In v2,
+Alice's own message to Bob, put back into Alice's mailbox with ``from = Bob``
+(the relay ``from`` field is not authenticated), opened as a message *from
+Bob*. The receiver now compares the authenticated sender key with the key it
+expects (the contact's) and rejects the envelope otherwise. The recipient needs
+no field of its own: only the two holders of the pair key can open the
+envelope, and the sender key tells which of them sealed it.
 
 The content type tells the receiver what the body is before it interprets it,
 so new kinds of messages (read receipts, group headers, key rotation notices)
@@ -75,7 +87,7 @@ from pathlib import Path
 from typing import Callable, Collection, Protocol, runtime_checkable
 
 from nacl.exceptions import CryptoError
-from nacl.public import Box
+from nacl.public import Box, PrivateKey, PublicKey
 
 from . import keyfile
 from .errors import (
@@ -90,13 +102,14 @@ from .errors import (
 )
 
 MAGIC = b"HBM1"
-VERSION = 2
+VERSION = 3
 _HEADER = struct.Struct(">4sB")                 # magic, version
 HEADER = _HEADER.pack(MAGIC, VERSION)
 MESSAGE_ID_SIZE = 16
-_INNER = struct.Struct(f">{_HEADER.size}sB{MESSAGE_ID_SIZE}sQ")
+SENDER_KEY_SIZE = PublicKey.SIZE                # 32
+_INNER = struct.Struct(f">{_HEADER.size}sB{SENDER_KEY_SIZE}s{MESSAGE_ID_SIZE}sQ")
 # Bytes the envelope adds around the body: outer header, nonce, Poly1305 tag
-# and the inner header (header copy, type, message ID, timestamp).
+# and the inner header (header copy, type, sender key, message ID, timestamp).
 OVERHEAD = _HEADER.size + Box.NONCE_SIZE + 16 + _INNER.size
 _MIN_BOX_SIZE = Box.NONCE_SIZE + 16             # nonce + Poly1305 tag
 
@@ -183,8 +196,16 @@ class DecryptedMessage:
 # Sealing / opening
 # ──────────────────────────────────────────────────────────────────
 
+def _check_keys(private_key: object, public_key: object, role: str) -> None:
+    if not isinstance(private_key, PrivateKey):
+        raise TypeError("my_private_key must be a nacl.public.PrivateKey")
+    if not isinstance(public_key, PublicKey):
+        raise TypeError(f"{role} must be a nacl.public.PublicKey")
+
+
 def seal(
-    box: Box,
+    my_private_key: PrivateKey,
+    recipient_public_key: PublicKey,
     text: str,
     *,
     type: int = MessageType.TEXT,  # noqa: A002 - mirrors the wire field
@@ -192,14 +213,20 @@ def seal(
     timestamp_ms: int | None = None,
     clock: Clock = time.time,
 ) -> EncryptedMessage:
-    """Encrypt ``text`` into an envelope of the given content ``type``.
+    """Encrypt ``text`` from ``my_private_key`` to ``recipient_public_key``
+    into an envelope of the given content ``type``.
+
+    The sender key written into the envelope is derived from
+    ``my_private_key``, so a caller cannot claim another sender.
 
     ``message_id`` and ``timestamp_ms`` exist for tests and for re-sending the
     *same* logical message; normal callers leave them out.
 
     :raises UnsupportedMessageType: ``type`` is 0, outside 0–255 or an
         undefined core type.
+    :raises TypeError: the keys are not ``nacl.public`` key objects.
     """
+    _check_keys(my_private_key, recipient_public_key, "recipient_public_key")
     content_type = _check_type(type)
     if message_id is None:
         message_id = os.urandom(MESSAGE_ID_SIZE)
@@ -210,7 +237,9 @@ def seal(
     if not 0 <= timestamp_ms <= MAX_TIMESTAMP_MS:
         raise ValueError(f"timestamp_ms must be between 0 and {MAX_TIMESTAMP_MS}")
 
-    inner = _INNER.pack(HEADER, content_type, message_id, timestamp_ms)
+    sender_key = bytes(my_private_key.public_key)
+    inner = _INNER.pack(HEADER, content_type, sender_key, message_id, timestamp_ms)
+    box = Box(my_private_key, recipient_public_key)
     wire = HEADER + bytes(box.encrypt(inner + text.encode("utf-8")))
     return EncryptedMessage(
         ciphertext=base64.b64encode(wire).decode("ascii"),
@@ -243,12 +272,18 @@ def decode_wire(ciphertext: str) -> bytes:
 
 
 def open_envelope(
-    box: Box,
+    my_private_key: PrivateKey,
+    sender_public_key: PublicKey,
     ciphertext: str,
     *,
     allowed_types: Collection[int] | None = None,
 ) -> DecryptedMessage:
-    """Decrypt and parse an envelope. Does **not** check freshness or replay.
+    """Decrypt and parse an envelope sealed by ``sender_public_key`` for
+    ``my_private_key``. Does **not** check freshness or replay.
+
+    The envelope must name ``sender_public_key`` as its sender. In particular
+    an envelope we sealed ourselves for that contact is rejected, although it
+    decrypts with the same pair key (reflection, see the module docstring).
 
     :param allowed_types: if given, any other content type raises
         :class:`~hushbox_core.errors.UnexpectedMessageType` (checked after
@@ -258,9 +293,12 @@ def open_envelope(
     :raises UnsupportedMessageFormat: envelope of another format version.
     :raises UnsupportedMessageType: content type this version does not know.
     :raises UnexpectedMessageType: known type, but not one of ``allowed_types``.
-    :raises DecryptionError: Poly1305 failure, wrong sender, header mismatch,
-        a timestamp past year 9999 or a body that is not UTF-8.
+    :raises DecryptionError: Poly1305 failure, wrong sender (also our own
+        envelope reflected back), header mismatch, a timestamp past year 9999
+        or a body that is not UTF-8.
+    :raises TypeError: the keys are not ``nacl.public`` key objects.
     """
+    _check_keys(my_private_key, sender_public_key, "sender_public_key")
     raw = decode_wire(ciphertext)
     if raw[: len(MAGIC)] != MAGIC:
         raise InvalidCiphertextFormat(
@@ -284,7 +322,7 @@ def open_envelope(
         raise InvalidCiphertextFormat("Szyfrogram jest obcięty.")
 
     try:
-        inner = box.decrypt(raw[_HEADER.size :])
+        inner = Box(my_private_key, sender_public_key).decrypt(raw[_HEADER.size :])
     except CryptoError as exc:
         raise DecryptionError(
             "Nie udało się odszyfrować wiadomości — szyfrogram został "
@@ -293,12 +331,19 @@ def open_envelope(
 
     if len(inner) < _INNER.size:
         raise DecryptionError("Odszyfrowana koperta jest niekompletna.")
-    inner_header, content_type, message_id, timestamp_ms = _INNER.unpack(
+    inner_header, content_type, sender_key, message_id, timestamp_ms = _INNER.unpack(
         inner[: _INNER.size]
     )
     if not hmac.compare_digest(inner_header, raw[: _HEADER.size]):
         raise DecryptionError(
             "Nagłówek koperty nie zgadza się z zaszyfrowaną treścią."
+        )
+    if not hmac.compare_digest(sender_key, bytes(sender_public_key)):
+        # Authentic for this key pair, but sealed by the other party: our own
+        # envelope reflected back to us, never a message from the contact.
+        raise DecryptionError(
+            "Wiadomość nie pochodzi od tego kontaktu (nadawca w kopercie się "
+            "nie zgadza) — odrzucono."
         )
     if timestamp_ms > MAX_TIMESTAMP_MS:
         # Authentic, but not a date anyone can display. Checked for every type
