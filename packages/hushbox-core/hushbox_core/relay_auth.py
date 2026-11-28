@@ -479,6 +479,8 @@ class RelaySession:
                 )
             except Exception as exc:  # noqa: BLE001 - best effort only
                 logger.debug("Relay logout failed: %s", type(exc).__name__)
+        # Close the kept-alive connection and stop the HTTP loop thread.
+        self._http.close()
 
     def cancel_pending(self) -> None:
         """Interrupt in-flight HTTP, also during a login that holds the lock."""

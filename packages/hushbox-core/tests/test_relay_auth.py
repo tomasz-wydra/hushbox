@@ -8,6 +8,7 @@ transport interrupts a parked long poll.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import secrets
@@ -699,32 +700,37 @@ class TestPollLoop:
 # Real socket: stopping interrupts a parked long poll
 # ─────────────────────────────────────────────────────────────────
 
-def test_stop_interrupts_parked_long_poll_on_a_real_socket(key):
-    fake = FakeRelay(_pk(key), audience="http://127.0.0.1")
-    parked = threading.Event()
-    release = threading.Event()
+@contextlib.contextmanager
+def _real_relay(fake, *, on_request=None):
+    """Serve ``fake`` over a real local socket (HTTP/1.1, keep-alive).
 
+    ``on_request(handler, method, path)`` runs before the answer, e.g. to
+    record the client port or to hold a long poll open.
+    """
     class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
         def log_message(self, *args):
             pass
 
         def _serve(self):
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            path = self.path.split("?")[0]
-            if self.command == "GET" and path.startswith("/messages/"):
-                parked.set()
-                release.wait(10)      # the relay holds the long poll open
+            if on_request is not None:
+                on_request(self, self.command, self.path.split("?")[0])
             resp = fake.handle(httpx.Request(
                 self.command, "http://127.0.0.1" + self.path, content=body,
                 headers=dict(self.headers),
             ))
-            self.send_response(resp.status_code)
-            for k, v in resp.headers.items():
-                if k.lower() not in ("content-length", "transfer-encoding"):
-                    self.send_header(k, v)
-            self.send_header("Content-Length", str(len(resp.content)))
-            self.end_headers()
-            self.wfile.write(resp.content)
+            try:
+                self.send_response(resp.status_code)
+                for k, v in resp.headers.items():
+                    if k.lower() not in ("content-length", "transfer-encoding"):
+                        self.send_header(k, v)
+                self.send_header("Content-Length", str(len(resp.content)))
+                self.end_headers()
+                self.wfile.write(resp.content)
+            except ConnectionError:
+                self.close_connection = True   # client cancelled and hung up
 
         do_GET = do_POST = do_DELETE = _serve
 
@@ -734,16 +740,72 @@ def test_stop_interrupts_parked_long_poll_on_a_real_socket(key):
     url = f"http://127.0.0.1:{server.server_address[1]}"
     fake.audience = relay_auth.canonical_audience(url)
     try:
-        t = AuthenticatedRelayTransport(url, _pk(key), key)   # real, cancellable HTTP
-        t.on_delivery = lambda *a: True
-        t.start_polling()
-        assert parked.wait(5), "poll never reached the relay"
-        started = time.monotonic()
-        t.stop_polling()
-        t._polling_thread.join(5)
-        assert not t.is_polling
-        assert time.monotonic() - started < 2, "stop did not interrupt the long poll"
+        yield url
     finally:
-        release.set()
         server.shutdown()
         server.server_close()
+
+
+def test_stop_interrupts_parked_long_poll_on_a_real_socket(key):
+    fake = FakeRelay(_pk(key))
+    parked = threading.Event()
+    release = threading.Event()
+
+    def hold_poll(handler, method, path):
+        if method == "GET" and path.startswith("/messages/"):
+            parked.set()
+            release.wait(10)      # the relay holds the long poll open
+
+    with _real_relay(fake, on_request=hold_poll) as url:
+        try:
+            t = AuthenticatedRelayTransport(url, _pk(key), key)   # real, cancellable HTTP
+            t.on_delivery = lambda *a: True
+            t.start_polling()
+            assert parked.wait(5), "poll never reached the relay"
+            started = time.monotonic()
+            t.stop_polling()
+            t._polling_thread.join(5)
+            assert not t.is_polling
+            assert time.monotonic() - started < 2, "stop did not interrupt the long poll"
+            assert t.wait_stopped(5)
+        finally:
+            release.set()
+
+
+def test_requests_reuse_one_connection_on_a_real_socket(key):
+    """Login (challenge + verify), poll, ACK and logout share one kept-alive
+    connection instead of a new TCP/TLS handshake per request."""
+    fake = FakeRelay(_pk(key))
+    fake.inbox.append({"id": "m1", "from": "", "payload": "x"})
+    seen: list[tuple[str, str, int]] = []
+
+    def record(handler, method, path):
+        seen.append((method, path, handler.client_address[1]))
+
+    with _real_relay(fake, on_request=record) as url:
+        s = RelaySession(url, key)
+        s.token()
+        s.request("GET", f"/messages/{s.recipient_hash}", timeout=5)
+        s.request("DELETE", f"/messages/{s.recipient_hash}/m1", timeout=5)
+        s.close(logout=True)
+
+    methods = [(m, p.rsplit("/", 1)[-1]) for m, p, _ in seen]
+    assert len(seen) == 5, methods
+    assert seen[-1][1] == "/auth/logout"
+    assert len({port for _, _, port in seen}) == 1, "a new connection was opened"
+
+
+def test_close_stops_the_http_thread_and_refuses_requests(key):
+    from hushbox_core import RelayRequestStopped
+    fake = FakeRelay(_pk(key))
+    with _real_relay(fake) as url:
+        s = RelaySession(url, key)
+        s.token()
+        thread = s._http._thread
+        assert thread is not None and thread.is_alive()
+        s.close(logout=True)
+        thread.join(5)
+        assert not thread.is_alive()
+        with pytest.raises(RelayRequestStopped):
+            s._http.request("GET", url + "/health", timeout=1)
+        s.close()           # idempotent

@@ -27,7 +27,8 @@ class InvalidPassphrase(KeyStoreError):
 
 
 class UnsupportedKeyFormat(KeyStoreError):
-    """Nagłówek pliku klucza pochodzi z nowszej, nieobsługiwanej wersji."""
+    """Nagłówek pliku klucza pochodzi z nowszej, nieobsługiwanej wersji albo
+    ma parametry Argon2id poza obsługiwanym zakresem."""
 
 
 # ── kontakty / tożsamość ──────────────────────────────────────────

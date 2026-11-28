@@ -130,9 +130,10 @@ class TestWireFormat:
         with pytest.raises(ValueError):
             envelope.seal(keys[0], "x", message_id=bad)
 
-    def test_seal_rejects_negative_timestamp(self, keys):
+    @pytest.mark.parametrize("bad", [-1, envelope.MAX_TIMESTAMP_MS + 1])
+    def test_seal_rejects_out_of_range_timestamp(self, keys, bad):
         with pytest.raises(ValueError):
-            envelope.seal(keys[0], "x", timestamp_ms=-1)
+            envelope.seal(keys[0], "x", timestamp_ms=bad)
 
     def test_whitespace_and_line_wrapping_are_tolerated(self, keys):
         ct = envelope.seal(keys[0], "mail " * 50).ciphertext
@@ -209,6 +210,30 @@ class TestRejectedInputs:
     def test_non_utf8_body(self, keys):
         with pytest.raises(DecryptionError, match="UTF-8"):
             envelope.open_envelope(keys[1], _forge(keys[0], _inner(body=b"\xff\xfe")))
+
+    @pytest.mark.parametrize("ts", [envelope.MAX_TIMESTAMP_MS + 1, 2**64 - 1])
+    @pytest.mark.parametrize("content_type", [MessageType.TEXT, MessageType.FILE_PACKAGE])
+    def test_timestamp_past_year_9999_is_rejected(self, keys, ts, content_type):
+        """Authentic but undisplayable; file packages skip the receive window,
+        so the check must be in open_envelope, before sent_at can overflow."""
+        forged = _forge(keys[0], _inner(content_type=content_type, ts=ts))
+        with pytest.raises(DecryptionError, match="poza zakresem"):
+            envelope.open_envelope(keys[1], forged)
+
+    def test_largest_timestamp_opens_and_has_a_date(self, keys):
+        forged = _forge(keys[0], _inner(content_type=MessageType.FILE_PACKAGE,
+                                        ts=envelope.MAX_TIMESTAMP_MS))
+        msg = envelope.open_envelope(keys[1], forged)
+        assert msg.sent_at.year == 9999
+
+    @pytest.mark.parametrize("bad", [b"SEJNMQI=", None, 123, ["x"]])
+    def test_non_str_ciphertext_is_format_error(self, keys, bad):
+        with pytest.raises(InvalidCiphertextFormat, match="str"):
+            envelope.open_envelope(keys[1], bad)
+
+    def test_non_ascii_text_is_format_error(self, keys):
+        with pytest.raises(InvalidCiphertextFormat):
+            envelope.open_envelope(keys[1], "zażółć")
 
     def test_no_nacl_exception_leaks(self, keys):
         from nacl.exceptions import CryptoError

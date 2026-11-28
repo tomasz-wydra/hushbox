@@ -69,7 +69,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import IntEnum
 from pathlib import Path
 from typing import Callable, Collection, Protocol, runtime_checkable
@@ -107,6 +107,12 @@ MAX_MESSAGE_AGE = 30 * 24 * 60 * 60.0           # seconds
 MAX_CLOCK_SKEW = 10 * 60.0                      # seconds
 
 APP_TYPE_MIN = 128                              # 128–255: application-specific
+
+# Largest sender timestamp accepted: the last millisecond of year 9999, the
+# limit of ``datetime``. The wire field is uint64, but nothing later than this
+# can be shown as a date, so such an envelope is rejected when opened.
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+MAX_TIMESTAMP_MS = (datetime.max.replace(tzinfo=timezone.utc) - _EPOCH) // timedelta(milliseconds=1)
 
 Clock = Callable[[], float]
 
@@ -165,8 +171,12 @@ class DecryptedMessage:
 
     @property
     def sent_at(self) -> datetime:
-        """Sender's clock at sealing time, as an aware UTC datetime."""
-        return datetime.fromtimestamp(self.timestamp_ms / 1000, tz=timezone.utc)
+        """Sender's clock at sealing time, as an aware UTC datetime.
+
+        Exact integer arithmetic, independent of the platform's ``time_t``
+        (``datetime.fromtimestamp`` raises on Windows for some valid values).
+        """
+        return _EPOCH + timedelta(milliseconds=self.timestamp_ms)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -197,8 +207,8 @@ def seal(
         raise ValueError(f"message_id must be {MESSAGE_ID_SIZE} bytes")
     if timestamp_ms is None:
         timestamp_ms = int(clock() * 1000)
-    if timestamp_ms < 0:
-        raise ValueError("timestamp_ms must not be negative")
+    if not 0 <= timestamp_ms <= MAX_TIMESTAMP_MS:
+        raise ValueError(f"timestamp_ms must be between 0 and {MAX_TIMESTAMP_MS}")
 
     inner = _INNER.pack(HEADER, content_type, message_id, timestamp_ms)
     wire = HEADER + bytes(box.encrypt(inner + text.encode("utf-8")))
@@ -217,7 +227,12 @@ def decode_wire(ciphertext: str) -> bytes:
     string when lines get wrapped. Whitespace is not part of the base64
     alphabet, so removing it cannot change the decoded bytes; real corruption
     is still caught by Poly1305.
+
+    :raises InvalidCiphertextFormat: not a ``str`` (for example ``bytes`` or
+        ``None`` from a malformed relay answer), empty or not base64.
     """
+    if not isinstance(ciphertext, str):
+        raise InvalidCiphertextFormat("Ciphertext musi być tekstem (str).")
     compact = "".join(ciphertext.split())
     if not compact:
         raise InvalidCiphertextFormat("Ciphertext jest pusty.")
@@ -243,8 +258,8 @@ def open_envelope(
     :raises UnsupportedMessageFormat: envelope of another format version.
     :raises UnsupportedMessageType: content type this version does not know.
     :raises UnexpectedMessageType: known type, but not one of ``allowed_types``.
-    :raises DecryptionError: Poly1305 failure, wrong sender, header mismatch
-        or a body that is not UTF-8.
+    :raises DecryptionError: Poly1305 failure, wrong sender, header mismatch,
+        a timestamp past year 9999 or a body that is not UTF-8.
     """
     raw = decode_wire(ciphertext)
     if raw[: len(MAGIC)] != MAGIC:
@@ -285,6 +300,10 @@ def open_envelope(
         raise DecryptionError(
             "Nagłówek koperty nie zgadza się z zaszyfrowaną treścią."
         )
+    if timestamp_ms > MAX_TIMESTAMP_MS:
+        # Authentic, but not a date anyone can display. Checked for every type
+        # because file packages skip the receive window.
+        raise DecryptionError("Znacznik czasu w kopercie jest poza zakresem.")
     content_type = _check_type(content_type)
     if allowed_types is not None and content_type not in allowed_types:
         raise UnexpectedMessageType(

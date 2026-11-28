@@ -65,6 +65,7 @@ The client MUST compute the audience from **its own configuration**, never from 
 - The session token MUST only be sent over HTTPS. Plain `http://` is acceptable for loopback hosts (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) and otherwise only after an explicit opt-in by the user. Without that, the client sends nothing at all, not even the challenge request.
 - Clients MUST NOT follow redirects. A `3xx` answer is an error and is never a reason to resend credentials to another origin.
 - TLS certificates MUST be verified normally.
+- Clients SHOULD reuse one kept-alive connection for the requests of a session (login, polls, acknowledgements, logout) instead of a new TCP and TLS handshake per request. The reference client does since 0.9.1.
 - Tokens MUST be kept in memory only: never written to disk, settings or logs, and never put in a URL or query string.
 
 `POST /messages` carries no credential. The same HTTPS rule SHOULD still apply to it, because the mailbox ids it carries are metadata; the reference client applies it.
