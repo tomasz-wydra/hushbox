@@ -54,7 +54,7 @@ from typing import Collection
 from nacl.encoding import Base64Encoder
 from nacl.public import PrivateKey, PublicKey
 
-from . import envelope, keyfile, signing
+from . import envelope, keyfile, keys, signing
 from .envelope import (
     MAX_CLOCK_SKEW,
     MAX_MESSAGE_AGE,
@@ -114,9 +114,10 @@ class ContactInfo:
     def pubkey_hash(self) -> str:
         """SHA-256 klucza publicznego (base64) — identyfikator w relay.
 
-        Hashowany jest string base64, NIE surowe bajty. Patrz docstring modułu.
+        Hashowany jest kanoniczny string base64, NIE surowe bajty
+        (:func:`hushbox_core.keys.mailbox_id`). Patrz docstring modułu.
         """
-        return hashlib.sha256(self.public_key.encode()).hexdigest()
+        return keys.mailbox_id(self.public_key)
 
     @property
     def fingerprint(self) -> str:
@@ -133,12 +134,14 @@ class ContactInfo:
     @classmethod
     def from_dict(cls, d: dict) -> "ContactInfo":
         # obsługa starego formatu (plain string zamiast dict)
+        # Klucze zapisane przez starsze wersje (np. z końcem linii) dostają
+        # kanoniczną pisownię, żeby identyfikator skrzynki był poprawny.
         if isinstance(d, str):
-            return cls(public_key=d)
+            return cls(public_key=keys.repair_public_key(d))
         # Unknown keys (e.g. the removed Telegram fields) are ignored and
         # dropped on the next save.
         return cls(
-            public_key= d.get("public_key", ""),
+            public_key= keys.repair_public_key(d.get("public_key", "")),
             relay_url=  d.get("relay_url",  ""),
             # Kontakty z wersji przed TOFU są traktowane jako NIEzweryfikowane.
             verified=   bool(d.get("verified", False)),
@@ -253,7 +256,7 @@ class EncryptionManager:
 
     def my_pubkey_hash(self) -> str:
         """SHA-256 własnego klucza publicznego (base64) — ID skrzynki relay."""
-        return hashlib.sha256(self.export_public_key().encode()).hexdigest()
+        return keys.mailbox_id(self.export_public_key())
 
     def my_fingerprint(self) -> str:
         """Fingerprint własnego klucza — do odczytania rozmówcy out-of-band."""
@@ -299,7 +302,10 @@ class EncryptionManager:
         name = name.strip()
         if not name:
             raise ValueError("Nazwa kontaktu nie może być pusta.")
-        _decode_pubkey(public_key_b64)  # walidacja
+        # Ścisła walidacja i kanoniczna pisownia: biały znak z kopiuj-wklej
+        # jest usuwany, inne śmieci odrzucane. Bez tego klucz z końcem linii
+        # trafiał do innej skrzynki relaya (audyt 0.9.1, ustalenie 2).
+        public_key_b64 = keys.canonical_public_key(public_key_b64)
         existing = self.contacts.get(name)
 
         key_changed = existing is not None and existing.public_key != public_key_b64
@@ -348,7 +354,10 @@ class EncryptionManager:
 
         if not expected:
             raise ValueError("Fingerprint do weryfikacji nie może być pusty.")
-        if not hmac.compare_digest(expected, actual):
+        # Porównanie bajtów: compare_digest na str spoza ASCII (literówka „ó”,
+        # myślnik typograficzny) rzuca TypeError zamiast zwykłej niezgodności
+        # (audyt 0.9.1, ustalenie 8).
+        if not hmac.compare_digest(expected.encode("utf-8"), actual.encode("utf-8")):
             raise FingerprintMismatch(
                 f"Fingerprint kontaktu '{name}' nie zgadza się. "
                 "Nie wysyłaj wiadomości i skontaktuj się z rozmówcą innym kanałem."
@@ -386,6 +395,12 @@ class EncryptionManager:
             raise KeyError(f"Kontakt '{old_name}' nie istnieje.")
         if not new_name:
             raise ValueError("Nowa nazwa nie może być pusta.")
+        if new_name == old_name:
+            return
+        if new_name in self.contacts:
+            # Nadpisanie skasowałoby klucz i weryfikację tamtego kontaktu, a pod
+            # jego nazwą zostałby cudzy klucz (audyt 0.9.1, ustalenie 3).
+            raise ValueError(f"Kontakt '{new_name}' już istnieje.")
         self.contacts[new_name] = self.contacts.pop(old_name)
         self._save_contacts()
 

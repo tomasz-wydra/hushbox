@@ -31,6 +31,7 @@ from hushbox_core import (
     RelayInsecureTransportError,
     RelayPermissionError,
     RelayRateLimited,
+    RelayRequestStopped,
     RelaySession,
     RelayUnavailable,
     pubkey_to_hash,
@@ -56,6 +57,7 @@ class FakeRelay:
         self.encrypt_to: str | None = None    # encrypt challenge to another key
         self.messages_status: list[int] = []  # scripted statuses for /messages/*
         self.challenge_status = 200
+        self.session_lifetime = 900
         self.retry_after: str | None = None
         self.inbox: list[dict] = []           # served by GET until DELETEd
         self.sent: list[dict] = []            # bodies of POST /messages
@@ -110,7 +112,7 @@ class FakeRelay:
             token = secrets.token_urlsafe(32)
             self.issued.append(token)
             return httpx.Response(200, json={"access_token": token, "token_type": "Bearer",
-                                             "expires_in": 900})
+                                             "expires_in": self.session_lifetime})
         if path == "/auth/logout":
             self.logouts.append(request.headers.get("Authorization", ""))
             return httpx.Response(204)
@@ -132,7 +134,8 @@ class FakeRelay:
             if request.method == "DELETE":
                 msg_id = path.rsplit("/", 1)[-1]
                 before = len(self.inbox)
-                self.inbox = [m for m in self.inbox if m["id"] != msg_id]
+                self.inbox = [m for m in self.inbox
+                              if not (isinstance(m, dict) and m.get("id") == msg_id)]
                 return httpx.Response(200 if len(self.inbox) < before else 404, json={"ok": True})
             since = request.url.params.get("since")
             msgs = self.inbox
@@ -438,7 +441,7 @@ class TestSession:
         s.close()
         assert fake.logouts == [f"Bearer {token}"]
         assert not s.has_token
-        with pytest.raises(RelayAuthError):
+        with pytest.raises(RelayRequestStopped):     # a stop, not an auth failure
             s.token()
 
 
@@ -533,16 +536,39 @@ class TestTransport:
         assert t._ack("msg-1") is True
         assert len(fake.paths("/messages/", "DELETE")) == 2
 
-    def test_failed_ack_is_not_fatal(self, key):
+    def test_failed_ack_keeps_cursor_and_is_retried(self, key):
+        """Audit 0.9.1, finding 4: moving ``since`` past an unacknowledged
+        message left it on the relay forever (``since`` returns only newer
+        ones). Now the batch stops, the loop backs off, the next poll
+        delivers the message again and it is acknowledged then."""
         fake = FakeRelay(_pk(key))
-        fake.inbox = [_msg(1)]
+        fake.inbox = [_msg(1), _msg(2)]
         t = _transport(key, fake)
-        t.on_delivery = lambda *a: True
+        seen = []
+        t.on_delivery = lambda i, f, p: seen.append(i) or True
         t.session.token()
         fake.messages_status = [200, 500]   # poll ok, DELETE fails
-        t._fetch_messages()
-        assert t._last_message_id == "m1"
-        assert len(fake.inbox) == 1        # redelivered later, deduplicated by the app
+        with pytest.raises(RelayUnavailable, match="acknowledgement"):
+            t._fetch_messages()
+        assert t._last_message_id == ""
+        assert seen == ["m1"]               # m2 not handled before m1 is acknowledged
+        assert t._fetch_messages() == 2     # m1 redelivered (app deduplicates), then m2
+        assert seen == ["m1", "m1", "m2"]
+        assert fake.inbox == [] and t._last_message_id == "m2"
+
+    def test_failed_ack_makes_the_loop_back_off(self, key, monkeypatch):
+        monkeypatch.setattr(relay_auth, "BACKOFF_BASE", 0.05)
+        fake = FakeRelay(_pk(key))
+        fake.inbox = [_msg(1)]
+        fake.messages_status = [200, 500] * 50
+        t = _transport(key, fake)
+        t.on_delivery = lambda *a: True
+        t.start_polling()
+        time.sleep(0.5)
+        t.stop_polling()
+        t._polling_thread.join(5)
+        polls = len(fake.paths("/messages/", "GET"))
+        assert 1 <= polls < 15, f"{polls} polls in 0.5 s: no backoff after a failed ACK"
 
     def test_start_and_stop_polling(self, key):
         fake = FakeRelay(_pk(key))
@@ -809,3 +835,91 @@ def test_close_stops_the_http_thread_and_refuses_requests(key):
         with pytest.raises(RelayRequestStopped):
             s._http.request("GET", url + "/health", timeout=1)
         s.close()           # idempotent
+
+
+# ─────────────────────────────────────────────────────────────────
+# Audit 0.9.1, findings 2 and 5-7
+# ─────────────────────────────────────────────────────────────────
+
+class TestAuditFixes:
+
+    def test_send_refuses_an_undecodable_recipient_key(self, key):
+        fake = FakeRelay(_pk(key))
+        with pytest.raises(ValueError):
+            send_message(RELAY, "nie-klucz", "x", client_factory=fake.factory)
+        assert fake.paths("/messages") == []
+
+    def test_any_spelling_of_a_key_addresses_its_mailbox(self, key):
+        pk = _pk(key)
+        assert pubkey_to_hash(pk + "\n") == pubkey_to_hash(" " + pk[:20] + "\r\n" + pk[20:])
+        assert pubkey_to_hash(pk + "\n") == pubkey_to_hash(pk)
+
+    @pytest.mark.parametrize("value, expected", [
+        ("nan", None), ("inf", None), ("-inf", None), ("abc", None),
+        ("0", 0.0), ("-5", 0.0), ("12.5", 12.5), ("99999", 3600.0),
+    ])
+    def test_retry_after_parsing(self, value, expected):
+        resp = httpx.Response(429, headers={"Retry-After": value})
+        assert relay_auth._retry_after(resp) == expected
+
+    @pytest.mark.parametrize("retry_after", ["0", "nan"])
+    def test_429_with_zero_or_nan_retry_after_backs_off(self, key, monkeypatch, retry_after):
+        """Audit finding 6: Event.wait(nan) and wait(0) return at once."""
+        monkeypatch.setattr(relay_auth, "BACKOFF_BASE", 0.05)
+        fake = FakeRelay(_pk(key))
+        fake.messages_status = [429] * 200
+        fake.retry_after = retry_after
+        t = _transport(key, fake)
+        t.on_delivery = lambda *a: True
+        t.start_polling()
+        time.sleep(0.5)
+        t.stop_polling()
+        t._polling_thread.join(5)
+        polls = len(fake.paths("/messages/", "GET"))
+        assert 1 <= polls < 15, f"{polls} polls in 0.5 s with Retry-After: {retry_after}"
+
+    def test_short_session_is_not_renewed_on_every_request(self, key):
+        """Audit finding 7: expires_in <= RENEW_MARGIN used to log in again
+        for every token() call."""
+        fake = FakeRelay(_pk(key))
+        fake.session_lifetime = 30
+        now = [1000.0]
+        s = RelaySession(RELAY, key, client_factory=fake.factory, clock=lambda: now[0])
+        token = s.token()
+        assert s.token() == token and s.token() == token
+        assert s.login_count == 1
+        now[0] += 16                       # past half of the 30 s lifetime
+        assert s.token() != token
+        assert s.login_count == 2
+
+    def test_long_session_keeps_the_normal_margin(self, key):
+        fake = FakeRelay(_pk(key))
+        now = [1000.0]
+        s = RelaySession(RELAY, key, client_factory=fake.factory, clock=lambda: now[0])
+        token = s.token()
+        now[0] += 900 - relay_auth.RENEW_MARGIN - 1
+        assert s.token() == token
+        now[0] += 2
+        assert s.token() != token
+
+    def test_logout_ends_a_running_poll_loop(self, key):
+        """Audit finding 5: after logout() the loop retried "session closed"
+        with backoff forever."""
+        fake = FakeRelay(_pk(key))
+        t = _transport(key, fake)
+        t.on_delivery = lambda *a: True
+        t.start_polling()
+        deadline = time.monotonic() + 5
+        while not fake.paths("/messages/", "GET"):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        t.logout()
+        t._polling_thread.join(3)
+        assert not t.is_polling
+
+    def test_closed_session_request_is_a_stop(self, key):
+        fake = FakeRelay(_pk(key))
+        s = _session(key, fake)
+        s.close(logout=False)
+        with pytest.raises(RelayRequestStopped):
+            s.request("GET", "/messages/x", timeout=1)

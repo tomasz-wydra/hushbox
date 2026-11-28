@@ -34,6 +34,8 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 Because the mailbox id hashes the text, exactly one encoding of a key is valid. Base64URL, missing padding, whitespace or non-zero trailing bits would address a different mailbox and are rejected by the relay (400).
 
+Clients MUST therefore store and hash only the canonical spelling. A key entered by a user (pasted from e-mail or SMS) SHOULD have whitespace removed and anything else outside the base64 alphabet rejected, and is then re-encoded canonically before it is stored or hashed. Otherwise a stray newline silently sends messages to a mailbox nobody reads. The reference client does this in `hushbox_core.keys` since 0.10.0.
+
 Test vectors:
 
 | Private key | Public key (base64) | Mailbox id |
@@ -140,7 +142,7 @@ A client MUST NOT offer a general "decrypt any sealed box" operation. The challe
 ### 5.4 Session use and renewal
 
 - Every authenticated request carries `Authorization: Bearer <access_token>`, at most 128 characters in total.
-- Clients SHOULD log in again before a session runs out, early enough that a long poll (section 6.2) never starts on a session that would expire mid-wait. The reference client renews when less than 40 s remain.
+- Clients SHOULD log in again before a session runs out, early enough that a long poll (section 6.2) never starts on a session that would expire mid-wait. The reference client renews when less than 40 s remain, or less than half of the session lifetime for sessions shorter than 80 s, so that a relay issuing short sessions does not get a new login for every request.
 - When an authenticated request returns **401**, the client SHOULD drop the token, log in again and repeat the request **once**. A second 401 is an authentication failure; do not loop.
 - **403** means a valid session without rights for the target (for example another mailbox). Renewing will not help: back off for a long time and report it.
 - Concurrent requests that need a token SHOULD share a single login in flight instead of each starting one.
@@ -190,9 +192,9 @@ A client MUST acknowledge a message only **after** it has stored it durably, or 
 
 1. poll with `since` = last stored id;
 2. for each message in order: store it locally (or record the rejection). On failure, stop the batch **without** acknowledging and retry later; the relay delivers the message again;
-3. acknowledge it, then advance the in-memory `since`.
+3. acknowledge it, then advance the in-memory `since`. If the acknowledgement fails, do **not** advance `since` and stop the batch: `since` returns only newer messages, so moving past an unacknowledged one would leave it in the queue for good.
 
-A failed acknowledgement is not fatal: the message is already stored, and on redelivery it is recognised (by relay id or by the envelope's message id) and acknowledged again. A 404 on the repeated `DELETE` after a token renewal means the first attempt already succeeded.
+A failed acknowledgement is not fatal: the message is already stored, and on redelivery it is recognised (by relay id or by the envelope's message id) and acknowledged again. The client backs off as for a network error before polling again. A 404 on the repeated `DELETE` after a token renewal means the first attempt already succeeded.
 
 ---
 
@@ -202,7 +204,7 @@ A failed acknowledgement is not fatal: the message is already stored, and on red
 |---|---|
 | network error, timeout, 5xx | retry with exponential backoff and jitter (reference: 1 s doubling up to 60 s, "equal jitter") |
 | poll answered at once with nothing stored (no messages, or none could be stored yet) | wait at least 1 s before the next poll. A relay answers immediately instead of holding the poll when too many clients wait on one mailbox, so polling again at once would spin. |
-| 429 | wait `Retry-After` seconds if present (capped at 3600), otherwise back off |
+| 429 | wait `Retry-After` seconds if present (capped at 3600), but never less than the normal backoff; a value that is not a finite number is ignored |
 | 401 on an authenticated request | renew the session once (5.4) |
 | 403 | stop retrying quickly; wait long (reference: 300 s) and tell the user |
 | 3xx | error; never follow |

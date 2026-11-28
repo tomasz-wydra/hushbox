@@ -32,10 +32,10 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import ipaddress
 import json
 import logging
+import math
 import random
 import re
 import threading
@@ -49,6 +49,7 @@ from nacl.encoding import Base64Encoder
 from nacl.exceptions import CryptoError
 from nacl.public import PrivateKey, SealedBox
 
+from . import keys
 from ._cancellable_http import CancellableRelayHTTP
 from .errors import (
     LocalDeliveryError,
@@ -105,12 +106,15 @@ ClientFactory = Callable[..., httpx.Client]
 # ─────────────────────────────────────────────────────────────────
 
 def pubkey_to_hash(public_key_b64: str) -> str:
-    """Mailbox id: SHA-256 hex over the **base64 text** of a public key.
+    """Mailbox id: SHA-256 hex over the canonical **base64 text** of a public
+    key (:func:`hushbox_core.keys.mailbox_id`).
 
-    Part of the wire protocol: hashing the raw 32 bytes instead would address
-    a different mailbox.
+    Part of the wire protocol: hashing the raw 32 bytes, or another spelling
+    of the same key, would address a different mailbox.
+
+    :raises ValueError: the value does not decode to a 32-byte key.
     """
-    return hashlib.sha256(public_key_b64.encode()).hexdigest()
+    return keys.mailbox_id(public_key_b64)
 
 
 def canonical_audience(url: str) -> str:
@@ -170,6 +174,9 @@ def _retry_after(resp: httpx.Response) -> float | None:
         value = float(raw)
     except ValueError:
         return None
+    if not math.isfinite(value):
+        # "nan" passes min/max unchanged and Event.wait(nan) returns at once.
+        return None
     return min(max(value, 0.0), 3600.0)
 
 
@@ -215,7 +222,9 @@ def send_message(
     (:func:`check_transport_security`), because the mailbox ids are metadata.
 
     :returns: the relay's JSON answer, ``{"ok": true, "id": "..."}``.
-    :raises ValueError: empty recipient or payload.
+    :raises ValueError: empty payload, or a recipient key that is empty or
+        does not decode to 32 bytes (nothing is sent to a mailbox nobody
+        reads).
     :raises RelayInsecureTransportError: plain HTTP to a remote host without
         ``allow_insecure_http``; nothing is sent.
     :raises RelayRateLimited: HTTP 429.
@@ -291,6 +300,7 @@ class RelaySession:
         self._lock = threading.Lock()
         self._token: str | None = None
         self._expires_at = 0.0          # monotonic deadline
+        self._renew_margin = RENEW_MARGIN
         self._closed = False
         self.login_count = 0            # observable for tests/diagnostics
 
@@ -347,13 +357,20 @@ class RelaySession:
         """Return a valid token, logging in (once, under the lock) if needed."""
         with self._lock:
             if self._closed or self._http.stopping:
-                raise RelayAuthError("relay session closed")
-            if self._token and self._expires_at - self._clock() > RENEW_MARGIN:
+                # A stop, not an error: the poll loop ends instead of retrying
+                # forever after logout() or close().
+                raise RelayRequestStopped("relay session closed")
+            if self._token and self._expires_at - self._clock() > self._renew_margin:
                 return self._token
             self._token = None
             token, lifetime = self._login()
             self._token = token
             self._expires_at = self._clock() + lifetime
+            # A relay may issue sessions shorter than RENEW_MARGIN; renewing
+            # "40 s before expiry" would then log in again on every request.
+            # Use half the lifetime instead (the relay caps a long poll at the
+            # session's expiry anyway).
+            self._renew_margin = min(RENEW_MARGIN, lifetime / 2)
             return token
 
     def invalidate(self, token: str) -> None:
@@ -454,7 +471,7 @@ class RelaySession:
             with self._lock:
                 closed = self._closed
             if closed:
-                raise RelayAuthError("relay session closed")
+                raise RelayRequestStopped("relay session closed")
             token = self.token()
             resp = self._raw(method, path, timeout=timeout, token=token, **kw)
             retried = True
@@ -603,7 +620,9 @@ class AuthenticatedRelayTransport:
         return thread is None or not thread.is_alive()
 
     def logout(self) -> None:
-        """Forget and revoke the session synchronously."""
+        """Forget and revoke the session synchronously; also ends a running
+        poll loop."""
+        self._stop_event.set()
         self.session.close(logout=True)
 
     # ── status reporting ─────────────────────────────────────────
@@ -649,7 +668,11 @@ class AuthenticatedRelayTransport:
                 break  # deliberate shutdown, not a failure and no reason to retry
             except RelayRateLimited as exc:
                 failures += 1
-                delay = exc.retry_after if exc.retry_after is not None else self._backoff(failures)
+                # Never less than our own backoff: "Retry-After: 0" from a
+                # misconfigured relay or proxy must not turn into a tight loop.
+                delay = self._backoff(failures)
+                if exc.retry_after is not None:
+                    delay = max(delay, exc.retry_after)
                 logger.warning("Relay %s rate-limited us; retrying in %.0fs", self.relay_url, delay)
             except (RelayPermissionError, RelayInsecureTransportError) as exc:
                 # Renewing the token cannot fix these: wait long, don't loop.
@@ -728,7 +751,13 @@ class AuthenticatedRelayTransport:
             if self._stop_event.is_set():
                 break  # stored; a redelivery is deduplicated and acknowledged then
 
-            self._ack(msg_id)
+            if not self._ack(msg_id):
+                # Keep the cursor: "since" returns only newer messages, so
+                # moving past an unacknowledged one would leave it on the relay
+                # for good (and fill the recipient's queue). The next poll
+                # delivers it again; the application deduplicates it and we
+                # acknowledge it then. Raising makes the loop back off.
+                raise RelayUnavailable("acknowledgement failed; message kept for redelivery")
             self._last_message_id = msg_id
         return handled_count
 

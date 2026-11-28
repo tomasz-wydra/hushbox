@@ -616,3 +616,69 @@ class TestContactFile:
     def test_add_contact_has_no_telegram_parameters(self, manager, bob):
         with pytest.raises(TypeError):
             manager.add_contact("Bob", bob.export_public_key(), telegram_bot_token="x")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Audit 0.9.1, findings 2, 3 and 8
+# ─────────────────────────────────────────────────────────────────
+
+class TestAuditFixes:
+
+    @pytest.mark.parametrize("spell", [
+        lambda k: k + "\n", lambda k: "  " + k + "\r\n", lambda k: k[:22] + "\n" + k[22:],
+    ])
+    def test_pasted_key_with_whitespace_is_stored_canonical(self, alice, bob, spell):
+        """A key pasted with a newline used to be stored as is, so messages
+        went to a mailbox nobody reads (finding 2)."""
+        alice.add_contact("Bob", spell(bob.export_public_key()))
+        contact = alice.get_contact("Bob")
+        assert contact.public_key == bob.export_public_key()
+        assert contact.pubkey_hash == bob.my_pubkey_hash()
+        assert alice.find_contact_by_pubkey_hash(bob.my_pubkey_hash()) == "Bob"
+
+    @pytest.mark.parametrize("junk", ["!", "#", "ą"])
+    def test_key_with_other_junk_is_rejected(self, alice, bob, junk):
+        key = bob.export_public_key()
+        with pytest.raises(ValueError):
+            alice.add_contact("Bob", key[:10] + junk + key[10:])
+        assert not alice.has_contact("Bob")
+
+    def test_same_key_with_whitespace_is_not_a_key_change(self, alice, bob):
+        alice.add_contact("Bob", bob.export_public_key())
+        alice.add_contact("Bob", bob.export_public_key() + "\n")   # no KeyConflictError
+
+    def test_legacy_contact_file_with_newline_is_repaired_on_load(self, tmp_path, bob):
+        import json
+        data_dir = tmp_path / "legacy"
+        EncryptionManager(data_dir=str(data_dir))
+        (data_dir / "contact_keys.json").write_text(json.dumps(
+            {"Bob": {"public_key": bob.export_public_key() + "\n", "verified": True}}
+        ), encoding="utf-8")
+        mgr = EncryptionManager(data_dir=str(data_dir))
+        assert mgr.get_contact("Bob").pubkey_hash == bob.my_pubkey_hash()
+        assert mgr.find_contact_by_pubkey_hash(bob.my_pubkey_hash()) == "Bob"
+
+    def test_rename_onto_an_existing_contact_is_refused(self, alice, bob, tmp_path):
+        """Finding 3: renaming Carol to Bob silently dropped Bob's key."""
+        carol = EncryptionManager(data_dir=str(tmp_path / "carol"))
+        alice.add_contact("Bob", bob.export_public_key())
+        alice.add_contact("Carol", carol.export_public_key())
+        alice.verify_contact("Carol", carol.my_fingerprint())
+        with pytest.raises(ValueError):
+            alice.rename_contact("Carol", "Bob")
+        assert alice.get_contact("Bob").public_key == bob.export_public_key()
+        assert not alice.is_verified("Bob")
+        assert alice.get_contact("Carol").public_key == carol.export_public_key()
+
+    def test_rename_to_the_same_name_is_a_no_op(self, alice, bob):
+        alice.add_contact("Bob", bob.export_public_key())
+        alice.rename_contact("Bob", " Bob ")
+        assert alice.list_contacts() == ["Bob"]
+
+    @pytest.mark.parametrize("typed", ["ó" * 64, "A1B2–C3D4", "zażółć"])
+    def test_non_ascii_fingerprint_is_a_mismatch_not_a_crash(self, alice, bob, typed):
+        """Finding 8: compare_digest on non-ASCII str raised TypeError."""
+        alice.add_contact("Bob", bob.export_public_key())
+        with pytest.raises(FingerprintMismatch):
+            alice.verify_contact("Bob", typed)
+        assert not alice.is_verified("Bob")
