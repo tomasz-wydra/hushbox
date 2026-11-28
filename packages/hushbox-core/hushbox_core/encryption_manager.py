@@ -31,9 +31,10 @@ Ochrona klucza prywatnego: patrz :mod:`hushbox_core.keyfile`. Hasło jest
 opcjonalne — pliki legacy (surowe 32 bajty) są nadal wczytywane, żeby nie
 zepsuć istniejących instalacji.
 
-Message format: every message is a versioned envelope with a content type, a
-message ID and a sender timestamp inside the ciphertext (see
-:mod:`hushbox_core.envelope`). ``decrypt``/``decrypt_message`` accept a
+Message format: every message is a versioned envelope with a content type,
+the sender's public key, a message ID and a sender timestamp inside the
+ciphertext (see :mod:`hushbox_core.envelope`). Opening checks that the sender
+key is the contact's, so our own message reflected back is rejected. ``decrypt``/``decrypt_message`` accept a
 message once per sender and message ID, within the receive window; seen IDs
 are kept in ``seen_messages.json`` next to the key unless another
 :class:`~hushbox_core.envelope.ReplayStore` is passed in. File packages go
@@ -51,7 +52,7 @@ from pathlib import Path
 from typing import Collection
 
 from nacl.encoding import Base64Encoder
-from nacl.public import Box, PrivateKey, PublicKey
+from nacl.public import PrivateKey, PublicKey
 
 from . import envelope, keyfile, signing
 from .envelope import (
@@ -405,14 +406,13 @@ class EncryptionManager:
     # Szyfrowanie / Deszyfrowanie
     # ------------------------------------------------------------------
 
-    def _get_box(self, contact_name: str) -> Box:
+    def _contact_key(self, contact_name: str) -> PublicKey:
         if contact_name not in self.contacts:
             raise KeyError(f"Brak klucza publicznego dla kontaktu '{contact_name}'.")
-        recipient_key = PublicKey(
+        return PublicKey(
             self.contacts[contact_name].public_key.encode(),
             encoder=Base64Encoder,
         )
-        return Box(self.private_key, recipient_key)
 
     def encrypt(self, contact_name: str, plaintext: str,
                 *, type: int = MessageType.TEXT) -> str:  # noqa: A002
@@ -426,8 +426,10 @@ class EncryptionManager:
     def encrypt_message(self, contact_name: str, plaintext: str,
                         *, type: int = MessageType.TEXT) -> EncryptedMessage:  # noqa: A002
         """Like :meth:`encrypt`, but also returns the message ID and timestamp."""
-        box = self._get_box(contact_name)
-        return envelope.seal(box, plaintext, type=type, clock=self._clock)
+        return envelope.seal(
+            self.private_key, self._contact_key(contact_name), plaintext,
+            type=type, clock=self._clock,
+        )
 
     def open_package(self, contact_name: str, ciphertext: str) -> str:
         """Open a file package (:attr:`MessageType.FILE_PACKAGE`).
@@ -439,9 +441,9 @@ class EncryptionManager:
         :raises UnexpectedMessageType: the envelope is not a file package.
         :raises DecryptionError: see :meth:`decrypt`.
         """
-        box = self._get_box(contact_name)
         return envelope.open_envelope(
-            box, ciphertext, allowed_types=(MessageType.FILE_PACKAGE,)
+            self.private_key, self._contact_key(contact_name), ciphertext,
+            allowed_types=(MessageType.FILE_PACKAGE,),
         ).text
 
     def decrypt(self, contact_name: str, ciphertext: str) -> str:
@@ -455,7 +457,7 @@ class EncryptionManager:
         :raises DecryptionError: niepoprawny base64 lub brak nagłówka koperty
             (``InvalidCiphertextFormat``), nowszy format
             (``UnsupportedMessageFormat``), zmanipulowany szyfrogram lub inny
-            nadawca, wiadomość spoza okna czasu (``MessageExpired``) albo już
+            nadawca (także nasza własna wiadomość odbita z powrotem), wiadomość spoza okna czasu (``MessageExpired``) albo już
             odebrana (``ReplayedMessage``). Warstwa UI może łapać wyłącznie
             ten typ bazowy.
         """
@@ -482,9 +484,11 @@ class EncryptionManager:
             twice concurrently.
         :raises DecryptionError: see :meth:`decrypt`.
         """
-        box = self._get_box(contact_name)
+        sender_key = self._contact_key(contact_name)
         sender = self.contacts[contact_name].pubkey_hash
-        message = envelope.open_envelope(box, ciphertext, allowed_types=types)
+        message = envelope.open_envelope(
+            self.private_key, sender_key, ciphertext, allowed_types=types,
+        )
         if message.type == MessageType.FILE_PACKAGE:
             raise UnexpectedMessageType(
                 "Pakiet pliku nie jest wiadomością — otwórz go jako plik."

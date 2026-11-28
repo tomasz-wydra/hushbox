@@ -41,10 +41,22 @@ class FakeClock:
 # Fixtures
 # ─────────────────────────────────────────────────────────────────
 
+class _Pair(tuple):
+    """(my_private_key, peer_public_key); ``*pair`` fits seal/open_envelope.
+    ``encrypt`` gives the raw pair-key Box, for forging envelopes."""
+
+    def __new__(cls, sk, pk):
+        return super().__new__(cls, (sk, pk))
+
+    def encrypt(self, data: bytes):
+        return Box(*self).encrypt(data)
+
+
 @pytest.fixture
 def keys():
     a, b = PrivateKey.generate(), PrivateKey.generate()
-    return Box(a, b.public_key), Box(b, a.public_key)   # (alice→bob, bob←alice)
+    # (alice→bob, bob←alice): (my_private_key, peer_public_key) pairs
+    return _Pair(a, b.public_key), _Pair(b, a.public_key)
 
 
 @pytest.fixture
@@ -70,14 +82,21 @@ def _b64(raw: bytes) -> str:
     return base64.b64encode(raw).decode()
 
 
-def _inner(content_type=1, body=b"x", header=None, ts=None):
-    """Hand-built v2 inner plaintext for forging test envelopes."""
-    return ((header or envelope.HEADER) + bytes([content_type]) + b"\x00" * 16
-            + (NOW_MS if ts is None else ts).to_bytes(8, "big") + body)
+_SENDER = b"\xAA" * 32      # placeholder, replaced by _forge with the real sender
 
 
-def _forge(box, inner, outer=None):
-    return _b64((outer or envelope.HEADER) + bytes(box.encrypt(inner)))
+def _inner(content_type=1, body=b"x", header=None, ts=None, sender=_SENDER):
+    """Hand-built v3 inner plaintext for forging test envelopes."""
+    return ((header or envelope.HEADER) + bytes([content_type]) + sender
+            + b"\x00" * 16 + (NOW_MS if ts is None else ts).to_bytes(8, "big") + body)
+
+
+def _forge(pair, inner, outer=None):
+    """Encrypt ``inner`` with the pair key; the placeholder sender becomes the
+    pair's own public key (an honest sender)."""
+    if inner[6:38] == _SENDER:
+        inner = inner[:6] + bytes(pair[0].public_key) + inner[38:]
+    return _b64((outer or envelope.HEADER) + bytes(pair.encrypt(inner)))
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -87,36 +106,36 @@ def _forge(box, inner, outer=None):
 class TestWireFormat:
 
     def test_header_is_magic_and_version(self, keys):
-        sealed = envelope.seal(keys[0], "hi", clock=FakeClock())
+        sealed = envelope.seal(*keys[0], "hi", clock=FakeClock())
         raw = _raw(sealed.ciphertext)
         assert raw[:4] == b"HBM1"
-        assert raw[4] == 2
+        assert raw[4] == 3
 
     def test_roundtrip_carries_id_and_timestamp(self, keys):
         mid = bytes(range(16))
-        sealed = envelope.seal(keys[0], "Zażółć gęślą jaźń 🔐",
+        sealed = envelope.seal(*keys[0], "Zażółć gęślą jaźń 🔐",
                                message_id=mid, timestamp_ms=1234567)
-        opened = envelope.open_envelope(keys[1], sealed.ciphertext)
+        opened = envelope.open_envelope(*keys[1], sealed.ciphertext)
         assert opened == DecryptedMessage("Zażółć gęślą jaźń 🔐", mid.hex(), 1234567,
                                           MessageType.TEXT)
         assert sealed.message_id == mid.hex()
         assert sealed.timestamp_ms == 1234567
 
     def test_empty_body_roundtrips(self, keys):
-        sealed = envelope.seal(keys[0], "", clock=FakeClock())
-        assert envelope.open_envelope(keys[1], sealed.ciphertext).text == ""
+        sealed = envelope.seal(*keys[0], "", clock=FakeClock())
+        assert envelope.open_envelope(*keys[1], sealed.ciphertext).text == ""
 
     def test_message_ids_are_random(self, keys):
-        ids = {envelope.seal(keys[0], "x").message_id for _ in range(50)}
+        ids = {envelope.seal(*keys[0], "x").message_id for _ in range(50)}
         assert len(ids) == 50
 
     def test_timestamp_comes_from_clock_in_ms(self, keys):
-        sealed = envelope.seal(keys[0], "x", clock=FakeClock(NOW + 0.1234))
+        sealed = envelope.seal(*keys[0], "x", clock=FakeClock(NOW + 0.1234))
         assert sealed.timestamp_ms == int((NOW + 0.1234) * 1000)
 
     def test_id_and_timestamp_are_not_visible_on_the_wire(self, keys):
         mid = b"\xAB" * 16
-        sealed = envelope.seal(keys[0], "x", message_id=mid, timestamp_ms=NOW_MS)
+        sealed = envelope.seal(*keys[0], "x", message_id=mid, timestamp_ms=NOW_MS)
         raw = _raw(sealed.ciphertext)
         assert mid not in raw
         assert NOW_MS.to_bytes(8, "big") not in raw
@@ -128,17 +147,17 @@ class TestWireFormat:
     @pytest.mark.parametrize("bad", [b"", b"\x00" * 15, b"\x00" * 17])
     def test_seal_rejects_bad_message_id(self, keys, bad):
         with pytest.raises(ValueError):
-            envelope.seal(keys[0], "x", message_id=bad)
+            envelope.seal(*keys[0], "x", message_id=bad)
 
     @pytest.mark.parametrize("bad", [-1, envelope.MAX_TIMESTAMP_MS + 1])
     def test_seal_rejects_out_of_range_timestamp(self, keys, bad):
         with pytest.raises(ValueError):
-            envelope.seal(keys[0], "x", timestamp_ms=bad)
+            envelope.seal(*keys[0], "x", timestamp_ms=bad)
 
     def test_whitespace_and_line_wrapping_are_tolerated(self, keys):
-        ct = envelope.seal(keys[0], "mail " * 50).ciphertext
+        ct = envelope.seal(*keys[0], "mail " * 50).ciphertext
         wrapped = "  " + "\r\n".join(ct[i:i + 64] for i in range(0, len(ct), 64)) + "\n"
-        assert envelope.open_envelope(keys[1], wrapped).text == "mail " * 50
+        assert envelope.open_envelope(*keys[1], wrapped).text == "mail " * 50
 
 
 
@@ -152,64 +171,71 @@ class TestRejectedInputs:
         """0.4.0 ciphertexts have no header and are no longer accepted."""
         legacy = _b64(bytes(keys[0].encrypt("stary format".encode())))
         with pytest.raises(InvalidCiphertextFormat, match="0.5.0"):
-            envelope.open_envelope(keys[1], legacy)
+            envelope.open_envelope(*keys[1], legacy)
 
     def test_newer_version_is_reported_as_unsupported(self, keys):
-        raw = bytearray(_raw(envelope.seal(keys[0], "x").ciphertext))
-        raw[4] = 3
+        raw = bytearray(_raw(envelope.seal(*keys[0], "x").ciphertext))
+        raw[4] = 4
         with pytest.raises(UnsupportedMessageFormat, match="Zaktualizuj"):
-            envelope.open_envelope(keys[1], _b64(bytes(raw)))
+            envelope.open_envelope(*keys[1], _b64(bytes(raw)))
+
+    def test_v2_envelope_from_0_6_to_0_9_is_rejected(self, keys):
+        """v2 (0.6.0-0.9.x) had no sender key and never shipped in a client."""
+        v2_header = b"HBM1\x02"
+        inner = v2_header + b"\x01" + b"\x00" * 16 + NOW_MS.to_bytes(8, "big") + b"x"
+        with pytest.raises(UnsupportedMessageFormat, match="starszym"):
+            envelope.open_envelope(*keys[1], _forge(keys[0], inner, outer=v2_header))
 
     def test_v1_envelope_from_0_5_is_rejected(self, keys):
         """v1 (hushbox-core 0.5.0) never shipped in a client; not accepted."""
         v1_header = b"HBM1\x01"
         inner = v1_header + b"\x00" * 16 + NOW_MS.to_bytes(8, "big") + b"x"
         with pytest.raises(UnsupportedMessageFormat, match="starszym"):
-            envelope.open_envelope(keys[1], _forge(keys[0], inner, outer=v1_header))
+            envelope.open_envelope(*keys[1], _forge(keys[0], inner, outer=v1_header))
 
     def test_unsupported_format_is_a_decryption_error(self):
         assert issubclass(UnsupportedMessageFormat, DecryptionError)
 
     @pytest.mark.parametrize("length", [4, 5, 5 + 24, 5 + 24 + 15])
     def test_truncated_envelope_is_format_error(self, keys, length):
-        raw = _raw(envelope.seal(keys[0], "x").ciphertext)[:length]
+        raw = _raw(envelope.seal(*keys[0], "x").ciphertext)[:length]
         with pytest.raises(InvalidCiphertextFormat):
-            envelope.open_envelope(keys[1], _b64(raw))
+            envelope.open_envelope(*keys[1], _b64(raw))
 
     def test_not_base64(self, keys):
         with pytest.raises(InvalidCiphertextFormat):
-            envelope.open_envelope(keys[1], "to nie jest base64 !!!")
+            envelope.open_envelope(*keys[1], "to nie jest base64 !!!")
 
     def test_empty(self, keys):
         with pytest.raises(InvalidCiphertextFormat):
-            envelope.open_envelope(keys[1], " \n ")
+            envelope.open_envelope(*keys[1], " \n ")
 
     def test_tampered_body_fails_poly1305(self, keys):
-        raw = bytearray(_raw(envelope.seal(keys[0], "x").ciphertext))
+        raw = bytearray(_raw(envelope.seal(*keys[0], "x").ciphertext))
         raw[-1] ^= 0x01
         with pytest.raises(DecryptionError):
-            envelope.open_envelope(keys[1], _b64(bytes(raw)))
+            envelope.open_envelope(*keys[1], _b64(bytes(raw)))
 
     def test_wrong_sender(self, keys):
-        eve = Box(PrivateKey.generate(), PrivateKey.generate().public_key)
-        ct = envelope.seal(eve, "x").ciphertext
+        ct = envelope.seal(PrivateKey.generate(), PrivateKey.generate().public_key,
+                           "x").ciphertext
         with pytest.raises(DecryptionError):
-            envelope.open_envelope(keys[1], ct)
+            envelope.open_envelope(*keys[1], ct)
 
     def test_inner_header_must_match_outer(self, keys):
         """A payload sealed under another version cannot be relabelled."""
-        inner = _inner(header=b"HBM1\x03")
+        inner = _inner(header=b"HBM1\x04")
         with pytest.raises(DecryptionError, match="Nagłówek"):
-            envelope.open_envelope(keys[1], _forge(keys[0], inner))
+            envelope.open_envelope(*keys[1], _forge(keys[0], inner))
 
     def test_short_inner_payload(self, keys):
         forged = envelope.HEADER + bytes(keys[0].encrypt(envelope.HEADER + b"\x00" * 10))
         with pytest.raises(DecryptionError):
-            envelope.open_envelope(keys[1], _b64(forged))
+            envelope.open_envelope(*keys[1], _b64(forged))
 
     def test_non_utf8_body(self, keys):
         with pytest.raises(DecryptionError, match="UTF-8"):
-            envelope.open_envelope(keys[1], _forge(keys[0], _inner(body=b"\xff\xfe")))
+            envelope.open_envelope(*keys[1], _forge(keys[0], _inner(body=b"\xff\xfe")))
 
     @pytest.mark.parametrize("ts", [envelope.MAX_TIMESTAMP_MS + 1, 2**64 - 1])
     @pytest.mark.parametrize("content_type", [MessageType.TEXT, MessageType.FILE_PACKAGE])
@@ -218,29 +244,66 @@ class TestRejectedInputs:
         so the check must be in open_envelope, before sent_at can overflow."""
         forged = _forge(keys[0], _inner(content_type=content_type, ts=ts))
         with pytest.raises(DecryptionError, match="poza zakresem"):
-            envelope.open_envelope(keys[1], forged)
+            envelope.open_envelope(*keys[1], forged)
 
     def test_largest_timestamp_opens_and_has_a_date(self, keys):
         forged = _forge(keys[0], _inner(content_type=MessageType.FILE_PACKAGE,
                                         ts=envelope.MAX_TIMESTAMP_MS))
-        msg = envelope.open_envelope(keys[1], forged)
+        msg = envelope.open_envelope(*keys[1], forged)
         assert msg.sent_at.year == 9999
 
     @pytest.mark.parametrize("bad", [b"SEJNMQI=", None, 123, ["x"]])
     def test_non_str_ciphertext_is_format_error(self, keys, bad):
         with pytest.raises(InvalidCiphertextFormat, match="str"):
-            envelope.open_envelope(keys[1], bad)
+            envelope.open_envelope(*keys[1], bad)
 
     def test_non_ascii_text_is_format_error(self, keys):
         with pytest.raises(InvalidCiphertextFormat):
-            envelope.open_envelope(keys[1], "zażółć")
+            envelope.open_envelope(*keys[1], "zażółć")
+
+    def test_own_envelope_reflected_back_is_rejected(self, keys):
+        """Box(a, B) == Box(b, A): Alice can decrypt her own envelope to Bob.
+        It must not open as a message *from* Bob (audit 0.9.1, finding 1)."""
+        alice_sk, bob_pk = keys[0]
+        sealed = envelope.seal(alice_sk, bob_pk, "teren czysty")
+        with pytest.raises(DecryptionError, match="nie pochodzi od tego kontaktu"):
+            envelope.open_envelope(alice_sk, bob_pk, sealed.ciphertext)
+
+    @pytest.mark.parametrize("content_type", [MessageType.TEXT, MessageType.FILE_PACKAGE])
+    def test_forged_sender_key_is_rejected(self, keys, content_type):
+        """Any sender key other than the expected one fails, for every type."""
+        other = bytes(PrivateKey.generate().public_key)
+        forged = _forge(keys[0], _inner(content_type=content_type, sender=other))
+        with pytest.raises(DecryptionError, match="nie pochodzi od tego kontaktu"):
+            envelope.open_envelope(*keys[1], forged)
+
+    def test_sender_key_is_inside_the_ciphertext(self, keys):
+        sealed = envelope.seal(*keys[0], "x")
+        assert bytes(keys[0][0].public_key) not in _raw(sealed.ciphertext)
+
+    def test_message_to_self_opens(self):
+        me = PrivateKey.generate()
+        sealed = envelope.seal(me, me.public_key, "notatka")
+        assert envelope.open_envelope(me, me.public_key, sealed.ciphertext).text == "notatka"
+
+    @pytest.mark.parametrize("bad", [
+        lambda sk, pk: (bytes(sk), pk),
+        lambda sk, pk: (sk, bytes(pk)),
+        lambda sk, pk: (sk, "klucz"),
+    ])
+    def test_keys_must_be_nacl_objects(self, keys, bad):
+        sk, pk = bad(*keys[0])
+        with pytest.raises(TypeError):
+            envelope.seal(sk, pk, "x")
+        with pytest.raises(TypeError):
+            envelope.open_envelope(sk, pk, "SEJNMQM=")
 
     def test_no_nacl_exception_leaks(self, keys):
         from nacl.exceptions import CryptoError
-        raw = bytearray(_raw(envelope.seal(keys[0], "x").ciphertext))
+        raw = bytearray(_raw(envelope.seal(*keys[0], "x").ciphertext))
         raw[10] ^= 0xFF
         try:
-            envelope.open_envelope(keys[1], _b64(bytes(raw)))
+            envelope.open_envelope(*keys[1], _b64(bytes(raw)))
         except DecryptionError:
             pass
         except CryptoError:
@@ -255,50 +318,50 @@ class TestContentTypes:
 
     @pytest.mark.parametrize("t", list(MessageType) + [128, 200, 255])
     def test_type_roundtrips(self, keys, t):
-        sealed = envelope.seal(keys[0], "body", type=t)
-        opened = envelope.open_envelope(keys[1], sealed.ciphertext)
+        sealed = envelope.seal(*keys[0], "body", type=t)
+        opened = envelope.open_envelope(*keys[1], sealed.ciphertext)
         assert opened.type == t == sealed.type
         assert opened.text == "body"
 
     def test_core_types_come_back_as_enum(self, keys):
         opened = envelope.open_envelope(
-            keys[1], envelope.seal(keys[0], "x", type=2).ciphertext)
+            *keys[1], envelope.seal(*keys[0], "x", type=2).ciphertext)
         assert opened.type is MessageType.FILE_DESCRIPTOR
 
     def test_default_type_is_text(self, keys):
-        assert envelope.seal(keys[0], "x").type is MessageType.TEXT
+        assert envelope.seal(*keys[0], "x").type is MessageType.TEXT
 
     def test_type_is_inside_the_ciphertext(self, keys):
-        a = _raw(envelope.seal(keys[0], "x", type=1, message_id=b"\0" * 16,
+        a = _raw(envelope.seal(*keys[0], "x", type=1, message_id=b"\0" * 16,
                                timestamp_ms=0).ciphertext)
-        b = _raw(envelope.seal(keys[0], "x", type=3, message_id=b"\0" * 16,
+        b = _raw(envelope.seal(*keys[0], "x", type=3, message_id=b"\0" * 16,
                                timestamp_ms=0).ciphertext)
         assert a[:5] == b[:5] and len(a) == len(b)
 
     @pytest.mark.parametrize("bad", [0, 4, 127, 256, -1, True, "1", 1.0])
     def test_seal_rejects_undefined_types(self, keys, bad):
         with pytest.raises(UnsupportedMessageType):
-            envelope.seal(keys[0], "x", type=bad)
+            envelope.seal(*keys[0], "x", type=bad)
 
     @pytest.mark.parametrize("bad", [0, 4, 127])
     def test_unknown_type_on_the_wire_is_unsupported(self, keys, bad):
         with pytest.raises(UnsupportedMessageType, match="Zaktualizuj"):
-            envelope.open_envelope(keys[1], _forge(keys[0], _inner(content_type=bad)))
+            envelope.open_envelope(*keys[1], _forge(keys[0], _inner(content_type=bad)))
 
     def test_unsupported_type_is_a_format_and_decryption_error(self):
         assert issubclass(UnsupportedMessageType, UnsupportedMessageFormat)
         assert issubclass(UnexpectedMessageType, DecryptionError)
 
     def test_allowed_types(self, keys):
-        ct = envelope.seal(keys[0], "x", type=MessageType.FILE_PACKAGE).ciphertext
-        envelope.open_envelope(keys[1], ct, allowed_types=(MessageType.FILE_PACKAGE,))
+        ct = envelope.seal(*keys[0], "x", type=MessageType.FILE_PACKAGE).ciphertext
+        envelope.open_envelope(*keys[1], ct, allowed_types=(MessageType.FILE_PACKAGE,))
         with pytest.raises(UnexpectedMessageType):
-            envelope.open_envelope(keys[1], ct, allowed_types=(MessageType.TEXT,))
+            envelope.open_envelope(*keys[1], ct, allowed_types=(MessageType.TEXT,))
 
     def test_overhead_constant(self, keys):
         for n in (0, 1, 999):
-            assert len(_raw(envelope.seal(keys[0], "a" * n).ciphertext)) - n \
-                == envelope.OVERHEAD == 75
+            assert len(_raw(envelope.seal(*keys[0], "a" * n).ciphertext)) - n \
+                == envelope.OVERHEAD == 107
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -424,6 +487,32 @@ class TestReplayStores:
 # ─────────────────────────────────────────────────────────────────
 # EncryptionManager integration
 # ─────────────────────────────────────────────────────────────────
+
+class TestManagerReflection:
+    """Audit 0.9.1, finding 1: our own envelope put back into our mailbox
+    with ``from = contact`` must not open as the contact's message."""
+
+    def test_own_message_is_not_a_message_from_the_contact(self, pair):
+        alice, _ = pair
+        ct = alice.encrypt("Bob", "Potwierdzam: teren czysty")
+        with pytest.raises(DecryptionError, match="nie pochodzi od tego kontaktu"):
+            alice.decrypt("Bob", ct)
+
+    def test_reflection_is_rejected_before_anything_is_recorded(self, pair):
+        alice, bob = pair
+        sent = alice.encrypt_message("Bob", "x")
+        with pytest.raises(DecryptionError):
+            alice.decrypt_message("Bob", sent.ciphertext)
+        assert not alice.replay_store.contains(bob.my_pubkey_hash, sent.message_id)
+        assert bob.decrypt("Alice", sent.ciphertext) == "x"     # still fine for Bob
+
+    def test_own_file_package_is_not_the_contacts_package(self, pair):
+        alice, bob = pair
+        ct = alice.encrypt("Bob", "{}", type=MessageType.FILE_PACKAGE)
+        with pytest.raises(DecryptionError, match="nie pochodzi od tego kontaktu"):
+            alice.open_package("Bob", ct)
+        assert bob.open_package("Alice", ct) == "{}"
+
 
 class TestManagerReplayProtection:
 
