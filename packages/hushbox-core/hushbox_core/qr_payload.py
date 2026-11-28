@@ -31,14 +31,11 @@ a scanner must treat the result like a manually entered key, unverified.
 """
 from __future__ import annotations
 
-import base64
-import binascii
 import json
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from nacl.public import PublicKey
-
+from . import keys
 from .encryption_manager import fingerprint_for_pubkey
 from .errors import InvalidQrPayload, UnsupportedQrPayload
 
@@ -70,13 +67,8 @@ class ContactCard:
 def _check_public_key(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise InvalidQrPayload("Kod QR nie zawiera klucza publicznego.")
-    try:
-        # Strict: Base64Encoder would silently drop characters outside the
-        # alphabet, so the same key could appear under several spellings.
-        raw = base64.b64decode(value.encode("ascii"), validate=True)
-    except (binascii.Error, ValueError, UnicodeEncodeError) as exc:
-        raise InvalidQrPayload("Klucz publiczny w kodzie QR jest nieprawidłowy.") from exc
-    if len(raw) != PublicKey.SIZE or base64.b64encode(raw).decode("ascii") != value:
+    # Strict: only the canonical spelling, no whitespace (keys.py).
+    if not keys.is_canonical_public_key(value):
         raise InvalidQrPayload("Klucz publiczny w kodzie QR jest nieprawidłowy.")
     return value
 

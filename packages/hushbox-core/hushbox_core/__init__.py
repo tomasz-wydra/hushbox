@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from . import envelope, keyfile, qr_payload, relay_auth, signing
+from . import envelope, keyfile, keys, qr_payload, relay_auth, signing
 from .encryption_manager import (
     EncryptionManager,
     ContactInfo,
@@ -56,7 +56,7 @@ __all__ = [
     "EncryptionManager", "ContactInfo",
     "fingerprint_for_pubkey", "normalize_fingerprint",
     "AuthenticatedRelayTransport", "RelaySession", "send_message", "pubkey_to_hash",
-    "keyfile", "envelope", "qr_payload", "relay_auth", "signing", "ContactCard",
+    "keyfile", "keys", "envelope", "qr_payload", "relay_auth", "signing", "ContactCard",
     "EncryptedMessage", "DecryptedMessage", "MessageType",
     "ReplayStore", "MemoryReplayStore", "JsonFileReplayStore",
     # wyjątki domenowe

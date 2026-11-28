@@ -114,11 +114,18 @@ man-in-the-middle vector. Pass `allow_key_change=True` only after the user has
 knowingly approved the new fingerprint (e.g. the contact reinstalled the app);
 any key change resets `verified` to `False`.
 
+`add_contact` removes whitespace from a pasted key, rejects any other
+character outside the base64 alphabet and stores the canonical spelling
+(`hushbox_core.keys.canonical_public_key`). `rename_contact` refuses a name
+that is already taken instead of overwriting that contact.
+
 > **Two different hashes of a public key — do not mix them up.**
 > `pubkey_hash` is SHA-256 over the **base64 string** and identifies the relay
 > inbox; it is part of the wire protocol, so every client must hash the base64
 > form. `fingerprint` is SHA-256 over the **raw key bytes** and is the value
-> shown to humans, stable regardless of base64 variant.
+> shown to humans, stable regardless of base64 variant. Derive mailbox ids
+> only with `hushbox_core.keys.mailbox_id` (also `pubkey_to_hash`), which
+> hashes the canonical spelling.
 
 ## Message format and replay protection
 
