@@ -51,6 +51,18 @@ RAW_KEY_SIZE = 32
 DEFAULT_OPSLIMIT = argon2id.OPSLIMIT_MODERATE
 DEFAULT_MEMLIMIT = argon2id.MEMLIMIT_MODERATE
 
+# Zakres parametrów Argon2id. Nagłówek pliku klucza jest niepodpisany, więc bez
+# górnej granicy podmieniony albo uszkodzony plik mógłby zażądać np. 4 GiB pamięci
+# i dowolnej liczby iteracji przy każdym starcie (zawieszenie, MemoryError).
+# Przy odczycie dolna granica to minimum libsodium: osłabione parametry w cudzym
+# pliku niczego atakującemu nie dają (kto podmienia plik, podmienia też klucz),
+# a nie chcemy odciąć istniejących plików. Przy zapisie wymagamy co najmniej
+# INTERACTIVE, żeby nie powstawały nowe słabo chronione pliki.
+MAX_OPSLIMIT = 10
+MAX_MEMLIMIT = 1024 * 1024 * 1024              # 1 GiB = MEMLIMIT_SENSITIVE
+MIN_SEAL_OPSLIMIT = argon2id.OPSLIMIT_INTERACTIVE
+MIN_SEAL_MEMLIMIT = argon2id.MEMLIMIT_INTERACTIVE
+
 
 def is_encrypted(data: bytes) -> bool:
     """Czy bufor to kontener chroniony hasłem (a nie legacy raw key)."""
@@ -68,6 +80,19 @@ def path_is_encrypted(path: str | os.PathLike[str]) -> bool:
         return False
     with open(p, "rb") as f:
         return is_encrypted(f.read(len(MAGIC)))
+
+
+def _check_kdf_params(opslimit: int, memlimit: int, *, min_ops: int, min_mem: int) -> None:
+    if not min_ops <= opslimit <= MAX_OPSLIMIT:
+        raise UnsupportedKeyFormat(
+            f"Parametr Argon2id opslimit={opslimit} poza dozwolonym zakresem "
+            f"{min_ops}–{MAX_OPSLIMIT}."
+        )
+    if not min_mem <= memlimit <= MAX_MEMLIMIT:
+        raise UnsupportedKeyFormat(
+            f"Parametr Argon2id memlimit={memlimit} poza dozwolonym zakresem "
+            f"{min_mem}–{MAX_MEMLIMIT} bajtów."
+        )
 
 
 def _derive(passphrase: str, salt: bytes, opslimit: int, memlimit: int) -> bytes:
@@ -92,6 +117,8 @@ def seal(
         raise KeyStoreError(f"Klucz prywatny musi mieć {RAW_KEY_SIZE} bajtów.")
     if not passphrase:
         raise KeyStoreError("Hasło nie może być puste.")
+    _check_kdf_params(opslimit, memlimit,
+                      min_ops=MIN_SEAL_OPSLIMIT, min_mem=MIN_SEAL_MEMLIMIT)
 
     salt = os.urandom(argon2id.SALTBYTES)
     derived = _derive(passphrase, salt, opslimit, memlimit)
@@ -122,6 +149,10 @@ def unseal(data: bytes, passphrase: str | None) -> bytes:
             f"Plik klucza w wersji {version}; ta wersja hushbox-core obsługuje "
             f"tylko wersję {VERSION}. Zaktualizuj aplikację."
         )
+    # Przed pytaniem o hasło: plik, którego i tak nie otworzymy, nie powinien
+    # wywoływać promptu.
+    _check_kdf_params(opslimit, memlimit,
+                      min_ops=argon2id.OPSLIMIT_MIN, min_mem=argon2id.MEMLIMIT_MIN)
 
     if passphrase is None:
         raise PassphraseRequired(

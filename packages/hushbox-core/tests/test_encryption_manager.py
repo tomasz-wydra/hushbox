@@ -370,6 +370,55 @@ class TestPrivateKeyAtRest:
         )
         assert keyfile.unseal(sealed, "haslo") == raw
 
+    @staticmethod
+    def _with_params(sealed: bytes, ops: int, mem: int) -> bytes:
+        import struct
+        return keyfile.MAGIC + bytes([keyfile.VERSION]) + struct.pack(">II", ops, mem) + sealed[13:]
+
+    @pytest.mark.parametrize("ops, mem", [
+        (keyfile.MAX_OPSLIMIT + 1, 64 * 1024 * 1024),
+        (2**32 - 1, 64 * 1024 * 1024),
+        (3, keyfile.MAX_MEMLIMIT + 1024),
+        (3, 2**32 - 1),
+        (0, 64 * 1024 * 1024),
+        (3, 0),
+    ])
+    @pytest.mark.parametrize("passphrase", [None, "haslo"])
+    def test_out_of_range_kdf_params_are_rejected_before_kdf(self, ops, mem, passphrase):
+        """Nagłówek jest niepodpisany: podmieniony plik nie może zażądać
+        gigabajtów pamięci ani milionów iteracji, i nie wywołuje promptu."""
+        from hushbox_core import UnsupportedKeyFormat
+        sealed = keyfile.seal(bytes(PrivateKey.generate()), "haslo",
+                              opslimit=keyfile.MIN_SEAL_OPSLIMIT,
+                              memlimit=keyfile.MIN_SEAL_MEMLIMIT)
+        with pytest.raises(UnsupportedKeyFormat, match="Argon2id"):
+            keyfile.unseal(self._with_params(sealed, ops, mem), passphrase)
+
+    def test_weak_params_in_existing_file_still_open(self):
+        """Dolna granica przy odczycie to minimum libsodium, nie INTERACTIVE."""
+        import os as _os
+        import struct
+        from nacl.pwhash import argon2id
+        from nacl.secret import SecretBox
+        raw = bytes(PrivateKey.generate())
+        salt = _os.urandom(argon2id.SALTBYTES)
+        ops, mem = argon2id.OPSLIMIT_MIN, argon2id.MEMLIMIT_MIN
+        derived = argon2id.kdf(SecretBox.KEY_SIZE, b"haslo", salt, opslimit=ops, memlimit=mem)
+        data = (keyfile.MAGIC + bytes([keyfile.VERSION]) + struct.pack(">II", ops, mem)
+                + salt + bytes(SecretBox(derived).encrypt(raw)))
+        assert keyfile.unseal(data, "haslo") == raw
+
+    @pytest.mark.parametrize("ops, mem", [
+        (keyfile.MIN_SEAL_OPSLIMIT - 1, keyfile.MIN_SEAL_MEMLIMIT),
+        (keyfile.MIN_SEAL_OPSLIMIT, keyfile.MIN_SEAL_MEMLIMIT - 1024),
+        (keyfile.MAX_OPSLIMIT + 1, keyfile.MIN_SEAL_MEMLIMIT),
+        (keyfile.MIN_SEAL_OPSLIMIT, keyfile.MAX_MEMLIMIT + 1024),
+    ])
+    def test_seal_refuses_params_outside_range(self, ops, mem):
+        from hushbox_core import UnsupportedKeyFormat
+        with pytest.raises(UnsupportedKeyFormat):
+            keyfile.seal(bytes(PrivateKey.generate()), "haslo", opslimit=ops, memlimit=mem)
+
 
 # ─────────────────────────────────────────────────────────────────
 # Fingerprint / TOFU

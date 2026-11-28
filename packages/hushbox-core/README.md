@@ -133,6 +133,8 @@ The content type, message ID and timestamp are inside the ciphertext, so the
 relay sees none of them. The header is repeated inside the ciphertext because
 NaCl `Box` has no associated data; comparing the two copies binds the version
 to the authenticated content. The envelope adds 75 bytes (`envelope.OVERHEAD`).
+Timestamps later than year 9999 (`envelope.MAX_TIMESTAMP_MS`) are rejected when
+opening, for file packages too, because they cannot be represented as a date.
 
 **Breaking changes:** bare `Box` ciphertexts written by 0.4.0 and earlier are
 rejected with `InvalidCiphertextFormat`, and v1 envelopes from 0.5.0 with
@@ -264,7 +266,7 @@ All exceptions derive from `HushboxError`:
 |---|---|
 | `PassphraseRequired` | the key file is encrypted but no password was supplied |
 | `InvalidPassphrase` | the supplied password does not unseal the key file |
-| `UnsupportedKeyFormat` | the key file header is not a format this version understands |
+| `UnsupportedKeyFormat` | the key file header is not a format this version understands, or its Argon2id parameters are out of range (opslimit ≤ 10, memlimit ≤ 1 GiB; checked before any password prompt) |
 | `KeyConflictError` | a contact already exists with a different public key |
 | `FingerprintMismatch` | `verify_contact` received a fingerprint that does not match |
 | `InvalidCiphertextFormat` | the ciphertext is not valid base64, has no envelope header (pre-0.5.0 message) or is truncated |
