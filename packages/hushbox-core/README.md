@@ -122,23 +122,39 @@ any key change resets `verified` to `False`.
 
 ## Message format and replay protection
 
-Every message is a versioned envelope (`hushbox_core.envelope`), format v2 since 0.6.0:
+Every message is a versioned envelope (`hushbox_core.envelope`), format v3 since 0.10.0:
 
 ```
-base64( "HBM1" | version=2 | Box(nonce || ciphertext) )
-Box plaintext: header copy (5 B) | content type (1 B) | message ID (16 random bytes) | timestamp ms (uint64 BE) | UTF-8 body
+base64( "HBM1" | version=3 | Box(nonce || ciphertext) )
+Box plaintext: header copy (5 B) | content type (1 B) | sender public key (32 B) | message ID (16 random bytes) | timestamp ms (uint64 BE) | UTF-8 body
 ```
 
-The content type, message ID and timestamp are inside the ciphertext, so the
-relay sees none of them. The header is repeated inside the ciphertext because
+```python
+from hushbox_core import envelope
+
+sealed = envelope.seal(my_private_key, recipient_public_key, "text")
+opened = envelope.open_envelope(my_private_key, sender_public_key, sealed.ciphertext)
+```
+
+The sender's public key is inside the ciphertext and is checked against the
+expected sender when opening. NaCl `Box` uses the same shared key in both
+directions, so without it a message Alice sent to Bob, put back into Alice's
+mailbox with `from` = Bob, opened as a message *from* Bob (reflection; affects
+0.5.0–0.9.x). `seal` writes the key derived from `my_private_key`, so a caller
+cannot claim another sender.
+
+The content type, sender key, message ID and timestamp are inside the
+ciphertext, so the relay sees none of them. The header is repeated inside the ciphertext because
 NaCl `Box` has no associated data; comparing the two copies binds the version
-to the authenticated content. The envelope adds 75 bytes (`envelope.OVERHEAD`).
+to the authenticated content. The envelope adds 107 bytes (`envelope.OVERHEAD`).
 Timestamps later than year 9999 (`envelope.MAX_TIMESTAMP_MS`) are rejected when
 opening, for file packages too, because they cannot be represented as a date.
 
 **Breaking changes:** bare `Box` ciphertexts written by 0.4.0 and earlier are
-rejected with `InvalidCiphertextFormat`, and v1 envelopes from 0.5.0 with
-`UnsupportedMessageFormat`. All parties must upgrade together.
+rejected with `InvalidCiphertextFormat`, and v1 (0.5.0) and v2 (0.6.0–0.9.x)
+envelopes with `UnsupportedMessageFormat`. All parties must upgrade together.
+Since 0.10.0 `envelope.seal` and `envelope.open_envelope` take the two keys
+instead of a ready `Box`.
 
 ### Content types
 

@@ -21,7 +21,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 - Message *content* is protected by end-to-end encryption (see the message envelope in `hushbox_core.envelope`), not by this protocol. The relay still sees metadata: sender and recipient mailbox ids, sizes and timing. A malicious relay operator can still read, delete or withhold the encrypted blobs.
 - The session token is a bearer credential. Whoever obtains it has the mailbox's rights until the session expires or is revoked. TLS terminators in front of the relay see tokens and metadata in clear.
 - Challenge-response is not multi-factor authentication. It does not protect against a compromised device.
-- The `from` field of `POST /messages` is a sender **claim**, not authenticated by the relay. Receivers authenticate the sender cryptographically when decrypting the envelope.
+- The `from` field of `POST /messages` is a sender **claim**, not authenticated by the relay. Receivers authenticate the sender cryptographically when decrypting the envelope: since envelope v3 (`hushbox-core` 0.10.0) the authenticated sender public key inside it must equal the expected contact's key. A `Box` alone does not prove the direction (both parties share one key), so clients MUST check that field; an envelope v2 opened by a 0.9.x client could be the receiver's own message reflected back.
 
 ---
 
